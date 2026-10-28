@@ -50,6 +50,39 @@ def test_config_validation_preview_and_exports(tmp_path):
         )
 
 
+def test_delete_debate_removes_snapshot_and_cached_state(tmp_path):
+    database = str(tmp_path / "delete.sqlite3")
+    with TestClient(create_app(database, provider=FakeProvider(block=True))) as client:
+        debate_id = client.post("/api/debates", json=config().model_dump(mode="json")).json()["id"]
+        path = f"/api/debates/{debate_id}"
+        assert client.delete(path).status_code == 409
+        assert client.get(path).status_code == 200
+        client.post(f"{path}/control", json={"action": "stop"})
+        assert client.delete(path).status_code == 204
+        assert client.get("/api/debates").json() == []
+        assert client.get(path).status_code == 404
+        assert client.get(f"{path}/export").status_code == 404
+        assert client.post(f"{path}/control", json={"action": "resume"}).status_code == 404
+        assert client.patch(f"{path}/annotations", json={"notes": "test"}).status_code == 404
+        assert client.delete(path).status_code == 404
+    with TestClient(create_app(database, provider=FakeProvider())) as client:
+        assert client.get("/api/debates").json() == []
+        assert client.get(path).status_code == 404
+
+
+def test_deleting_archive_does_not_interrupt_another_debate(tmp_path):
+    with TestClient(
+        create_app(str(tmp_path / "delete.sqlite3"), provider=FakeProvider(block=True))
+    ) as client:
+        data = config().model_dump(mode="json")
+        old_id = client.post("/api/debates", json=data).json()["id"]
+        client.post(f"/api/debates/{old_id}/control", json={"action": "stop"})
+        active_id = client.post("/api/debates", json=data).json()["id"]
+        assert client.delete(f"/api/debates/{old_id}").status_code == 204
+        assert client.get("/api/health").json()["active_debate_id"] == active_id
+        assert [item["id"] for item in client.get("/api/debates").json()] == [active_id]
+
+
 def test_missing_key_and_static_frontend(tmp_path):
     provider = FakeProvider()
     provider.configured = False
@@ -62,6 +95,32 @@ def test_missing_key_and_static_frontend(tmp_path):
         assert client.post("/api/debates", json=config().model_dump(mode="json")).status_code == 409
         assert client.get("/api/debates").json() == []
         assert client.get("/api/unknown").status_code == 404
+
+
+def test_selected_provider_requires_its_own_key_and_matching_model(tmp_path):
+    groq, gemini = FakeProvider(), FakeProvider(block=True)
+    groq.configured = False
+    with TestClient(
+        create_app(str(tmp_path / "providers.sqlite3"), {"groq": groq, "gemini": gemini})
+    ) as client:
+        assert client.get("/api/health").json()["providers"] == {"groq": False, "gemini": True}
+        assert {item["id"] for item in client.get("/api/settings").json()["providers"]} == {
+            "groq",
+            "gemini",
+        }
+        denied = client.post("/api/debates", json=config().model_dump(mode="json"))
+        assert denied.status_code == 409
+        assert "GROQ_API_KEY" in denied.json()["detail"]
+        data = config(provider="gemini").model_dump(mode="json")
+        assert client.post("/api/debates", json={**data, "provider": "groq"}).status_code == 422
+        created = client.post("/api/debates", json=data)
+        assert created.status_code == 201
+        debate_id = created.json()["id"]
+        client.post(f"/api/debates/{debate_id}/control", json={"action": "stop"})
+        result = client.get(f"/api/debates/{debate_id}/export").json()
+        assert result["provider"] == "gemini"
+        assert result["model"] == data["model"]
+        assert groq.requests == []
 
 
 def test_traits_and_reasoning_are_independent():
@@ -89,9 +148,9 @@ def test_legacy_word_target_does_not_change_prompts_or_exported_config(tmp_path)
     assert restored.model_dump(mode="json") == data
     assert legacy["target_words"] == 100  # archived snapshots are not modified
     request = build_request(restored, 0, [])
-    assert request["max_completion_tokens"] == 2048
+    assert request["max_completion_tokens"] == 1024
     assert "słów" not in request["messages"][0]["content"]
-    assert "2048" not in request["messages"][0]["content"]
+    assert "1024" not in request["messages"][0]["content"]
     with TestClient(
         create_app(str(tmp_path / "legacy.sqlite3"), provider=FakeProvider())
     ) as client:

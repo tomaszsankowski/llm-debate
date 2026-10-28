@@ -8,12 +8,13 @@ function agent(name: string): Agent {
     goal: 'Przekonać rozmówcę do swojego stanowiska.',
     instructions: '',
     traits: { escalation: 3, openness: 3, reactivity: 3, risk: 3, aggression: 3, dominance: 3 },
-    max_tokens: 2048,
+    max_tokens: 1024,
     reasoning: false,
   }
 }
 export function emptyConfig(): Config {
   return {
+    provider: 'groq',
     name: 'Nowa debata',
     topic: '',
     question: '',

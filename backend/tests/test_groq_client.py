@@ -4,8 +4,9 @@ import groq
 import httpx
 import pytest
 
-from app.groq_client import GroqProvider, ProviderError, retry_delay
+from app.groq_client import GroqProvider
 from app.prompts import build_request
+from app.provider import ProviderError, retry_delay
 from tests.helpers import config
 
 
@@ -65,7 +66,7 @@ async def test_real_sdk_parses_stream_and_closes_without_leaking_key():
         (403, "permission"),
         (404, "model_unavailable"),
         (400, "invalid_request"),
-        (413, "invalid_request"),
+        (413, "request_too_large"),
         (429, "rate_limit"),
         (500, "provider_error"),
     ],
@@ -95,5 +96,33 @@ async def test_provider_errors_are_sanitized(status, code):
 def test_retry_after_formats():
     assert retry_delay({"retry-after": "3.5"}) == 3.5
     assert retry_delay({"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}) == 0
-    assert retry_delay({}) == 10
-    assert retry_delay({"retry-after": "NaN"}) == 10
+    assert retry_delay({}) is None
+    assert retry_delay({"retry-after": "NaN"}) is None
+    assert retry_delay({"retry-after": "Infinity"}) is None
+
+
+async def test_oversized_request_reported_as_429_is_not_retried():
+    async def handle(request):
+        return httpx.Response(
+            429,
+            json={
+                "error": {
+                    "message": "Request too large for model: secret-value",
+                    "code": "rate_limit_exceeded",
+                }
+            },
+        )
+
+    provider = GroqProvider("")
+    provider.client = groq.AsyncGroq(
+        api_key="secret-value",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+    )
+    with pytest.raises(ProviderError) as info:
+        async for _ in provider.stream(build_request(config(), 0, [])):
+            pass
+    assert info.value.code == "request_too_large"
+    assert info.value.retry_after is None
+    assert "secret-value" not in json.dumps(info.value.as_dict())
+    await provider.close()

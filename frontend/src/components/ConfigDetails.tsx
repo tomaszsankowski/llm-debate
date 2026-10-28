@@ -20,6 +20,7 @@ export function ConfigDetails({ debate, settings }: { debate: Debate; settings: 
       <summary>Konfiguracja debaty</summary>
       <Values
         values={[
+          ['Dostawca', debate.provider === 'gemini' ? 'Gemini' : 'Groq'],
           ['Model', debate.model],
           ['Wersja instrukcji', debate.prompt_version],
           [
@@ -54,7 +55,14 @@ export function ConfigDetails({ debate, settings }: { debate: Debate; settings: 
               ['Cel', agent.goal],
               ['Dodatkowe instrukcje', agent.instructions],
               ['Limit generacji', `${agent.max_tokens} tokenów`],
-              ['Reasoning', agent.reasoning ? 'Włączone' : 'Wyłączone'],
+              [
+                'Reasoning',
+                agent.reasoning
+                  ? 'Włączone'
+                  : debate.provider === 'gemini'
+                    ? 'Minimalny thinking, bez podsumowań'
+                    : 'Wyłączone',
+              ],
               ...(Object.entries(agent.traits) as [keyof Traits, number][]).map(
                 ([key, value]): [string, string] => [
                   settings.traits[key].label,

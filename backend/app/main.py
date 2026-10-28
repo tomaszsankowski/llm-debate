@@ -9,8 +9,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from .gemini_client import GeminiProvider
 from .groq_client import GroqProvider
-from .models import MODEL_ID, Annotation, Control, DebateConfig
+from .models import PROVIDERS, Annotation, Control, DebateConfig
 from .prompts import LEVELS, PROMPT_VERSION, TRAITS, system_prompt
 from .simulation import Conflict, Engine, now
 from .storage import Storage
@@ -23,7 +24,15 @@ def create_app(
     async def lifespan(app: FastAPI):
         storage = Storage(database_path or os.getenv("DATABASE_PATH", "data/debates.sqlite3"))
         storage.recover(now())
-        engine = Engine(storage, provider or GroqProvider(os.getenv("GROQ_API_KEY", "")))
+        providers = (
+            provider
+            if provider is not None
+            else {
+                "groq": GroqProvider(os.getenv("GROQ_API_KEY", "")),
+                "gemini": GeminiProvider(os.getenv("GEMINI_API_KEY", "")),
+            }
+        )
+        engine = Engine(storage, providers)
         app.state.engine = engine
         try:
             yield
@@ -58,15 +67,18 @@ def create_app(
     async def health():
         return {
             "status": "ok",
-            "api_key_configured": engine().provider.configured,
-            "model": MODEL_ID,
+            "api_key_configured": any(item.configured for item in engine().providers.values()),
+            "providers": {
+                key: bool(engine().providers.get(key) and engine().providers[key].configured)
+                for key in PROVIDERS
+            },
             "active_debate_id": engine().active_id,
         }
 
     @app.get("/api/settings")
     async def settings():
         return {
-            "model": MODEL_ID,
+            "providers": [{"id": key, **value} for key, value in PROVIDERS.items()],
             "prompt_version": PROMPT_VERSION,
             "traits": TRAITS,
             "levels": LEVELS,
@@ -91,6 +103,11 @@ def create_app(
     @app.get("/api/debates/{debate_id}")
     async def debate(debate_id: str):
         return engine().view(debate_id)
+
+    @app.delete("/api/debates/{debate_id}", status_code=204)
+    async def delete_debate(debate_id: str):
+        await engine().delete(debate_id)
+        return Response(status_code=204)
 
     @app.post("/api/debates/{debate_id}/control")
     async def control(debate_id: str, command: Control):
@@ -124,7 +141,11 @@ def create_app(
             queue = engine().subscribe(debate_id)
             try:
                 while not await request.is_disconnected():
-                    data = engine().view(debate_id)
+                    try:
+                        data = engine().view(debate_id)
+                    except KeyError:
+                        yield "event: deleted\ndata: {}\n\n"
+                        return
                     yield f"id: {data['revision']}\nevent: snapshot\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
                     while True:
                         try:

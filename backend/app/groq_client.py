@@ -1,36 +1,24 @@
-import math
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 
 import groq
 import httpx
 
+from .provider import ProviderError, retry_delay
 
-class ProviderError(Exception):
-    def __init__(self, code: str, message: str, retry_after: float | None = None):
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.retry_after = retry_after
-
-    def as_dict(self) -> dict:
-        return {"code": self.code, "message": self.message, "retry_after": self.retry_after}
+REQUEST_TOO_LARGE = (
+    "Groq odrzucił zbyt duże żądanie. Samo czekanie nie pomoże: potrzebne jest "
+    "krótsze wejście lub większy limit usługi. Historia rozmowy nie została skrócona."
+)
 
 
-def retry_delay(headers) -> float:
-    raw = headers.get("retry-after", "")
-    try:
-        seconds = float(raw)
-        if math.isfinite(seconds):
-            return max(0, seconds)
-    except ValueError:
-        pass
-    try:
-        deadline = parsedate_to_datetime(raw)
-        return max(0, (deadline - datetime.now(timezone.utc)).total_seconds())
-    except (ValueError, TypeError, OverflowError):
-        return 10
+def request_too_large(error: groq.APIStatusError) -> bool:
+    if error.status_code == 413:
+        return True
+    # Read only the classification; raw provider messages can echo sensitive input.
+    body = error.body if isinstance(error.body, dict) else {}
+    detail = body.get("error", body)
+    message = detail.get("message", "") if isinstance(detail, dict) else ""
+    return isinstance(message, str) and message.casefold().startswith("request too large")
 
 
 class GroqProvider:
@@ -84,6 +72,8 @@ class GroqProvider:
                     "usage": usage,
                 }
         except groq.RateLimitError as error:
+            if request_too_large(error):
+                raise ProviderError("request_too_large", REQUEST_TOO_LARGE) from None
             raise ProviderError(
                 "rate_limit",
                 "Osiągnięto limit API Groq. Oczekiwanie na ponowienie.",
@@ -103,10 +93,12 @@ class GroqProvider:
             ) from None
         except groq.APIStatusError as error:
             # Do not persist raw provider errors: they can echo credentials or input.
-            if error.status_code in {400, 413, 422}:
+            if request_too_large(error):
+                raise ProviderError("request_too_large", REQUEST_TOO_LARGE) from None
+            if error.status_code in {400, 422}:
                 raise ProviderError(
                     "invalid_request",
-                    "Groq odrzucił żądanie. Sprawdź dostępność modelu, limit generacji i długość kontekstu. Historia nie została skrócona.",
+                    f"Groq odrzucił żądanie (HTTP {error.status_code}). Sprawdź dostępność modelu, limit generacji i długość kontekstu. Historia nie została skrócona.",
                 ) from None
             raise ProviderError(
                 "provider_error",

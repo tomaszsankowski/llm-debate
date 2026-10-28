@@ -69,19 +69,77 @@ test('konfiguracja, SSE, pauza, krok, zapis, eksport i ponowne użycie ustawień
   await expect(page.getByLabel('Nazwa debaty', { exact: true })).toHaveValue(
     'Spór o pożyczony długopis',
   )
+  const otherTab = await page.context().newPage()
+  await otherTab.goto(`/#/debate/${id}`)
+  await expect(otherTab.getByTestId('public-message')).toHaveCount(4)
+  await page.getByRole('link', { name: 'Historia debat', exact: true }).click()
+  const remove = page.getByRole('button', { name: 'Usuń: Spór o pożyczony długopis' })
+  page.once('dialog', (dialog) => dialog.dismiss())
+  await remove.click()
+  await expect(remove).toBeVisible()
+  expect((await page.request.get(`/api/debates/${id}`)).status()).toBe(200)
+  page.once('dialog', (dialog) => dialog.accept())
+  await remove.click()
+  await expect(remove).toHaveCount(0)
+  await expect(otherTab).toHaveURL(/#\/history$/)
+  expect((await page.request.get(`/api/debates/${id}`)).status()).toBe(404)
+  await page.reload()
+  await expect(remove).toHaveCount(0)
+  await otherTab.close()
   expect(errors).toEqual([])
+})
+
+test('Gemini: wybór dostawcy, zapis modelu i ponowne użycie ustawień', async ({ page }) => {
+  await page.goto('/')
+  await page.getByLabel('Dostawca i model', { exact: true }).selectOption('gemini')
+  await page.getByRole('button', { name: 'Spór o długopis' }).click()
+  await expect(page.getByLabel('Dostawca i model', { exact: true })).toHaveValue('gemini')
+  await page.locator('summary').filter({ hasText: 'Przebieg rozmowy' }).click()
+  await page.getByLabel('Limit rund', { exact: true }).fill('1')
+  const agentA = page.locator('.agent-card').first()
+  await agentA.locator('summary').click()
+  await agentA.getByRole('checkbox', { name: 'Włącz reasoning' }).check()
+  await expect(agentA.getByText('Zapisuje podsumowania', { exact: false })).toBeVisible()
+  await expect(agentA.getByLabel('Limit generacji (tokeny)', { exact: true })).toHaveValue('2048')
+  await page.getByRole('button', { name: 'Rozpocznij debatę' }).click()
+  await expect(page.locator('.status-badge')).toHaveText('Zakończona', { timeout: 20000 })
+  const id = page.url().split('/').at(-1)
+  const data = await (await page.request.get(`/api/debates/${id}/export`)).json()
+  expect(data.provider).toBe('gemini')
+  expect(data.model).toBe('gemini-3.5-flash-lite')
+  expect(data.messages).toHaveLength(2)
+  expect(data.attempts[0].request.generationConfig.thinkingConfig.includeThoughts).toBe(true)
+  expect(data.attempts[1].request.generationConfig.thinkingConfig.includeThoughts).toBe(false)
+  expect(data.attempts[0].request.systemInstruction.parts[0].text).toContain('Nazwa: Anna')
+  await page.getByRole('button', { name: 'Użyj tych ustawień' }).click()
+  await expect(page.getByLabel('Dostawca i model', { exact: true })).toHaveValue('gemini')
+  await page.getByLabel('Dostawca i model', { exact: true }).selectOption('groq')
+  await expect(
+    page.locator('.agent-card').first().getByLabel('Limit generacji (tokeny)', { exact: true }),
+  ).toHaveValue('1024')
+  await page.getByRole('button', { name: 'Rozpocznij debatę' }).click()
+  await expect(page).toHaveURL(/#\/debate\//)
+  await page.getByRole('button', { name: 'Zatrzymaj', exact: true }).click()
+  await expect(page.locator('.status-badge')).toHaveText('Zatrzymana')
 })
 
 test('brak klucza oraz formularz na małym ekranie', async ({ page }, testInfo) => {
   await page.route('**/api/health', (route) =>
     route.fulfill({
-      json: { api_key_configured: false, model: 'qwen/qwen3.8-27b', active_debate_id: null },
+      json: {
+        api_key_configured: false,
+        providers: { groq: false, gemini: false },
+        active_debate_id: null,
+      },
     }),
   )
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/')
   await expect(page.getByRole('button', { name: 'Rozpocznij debatę' })).toBeDisabled()
   await expect(page.getByText('Dodaj klucz', { exact: false })).toBeVisible()
+  await page.getByLabel('Dostawca i model', { exact: true }).selectOption('gemini')
+  await expect(page.getByText('GEMINI_API_KEY', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Rozpocznij debatę' })).toBeDisabled()
   await page.getByRole('button', { name: 'Polityka migracyjna' }).click()
   await page.getByRole('button', { name: 'Podgląd instrukcji' }).click()
   await expect(page.getByRole('heading', { name: 'Instrukcje wysyłane do modelu' })).toBeVisible()

@@ -13,7 +13,13 @@ class BrowserTestProvider:
     configured = True
 
     async def stream(self, request):
-        is_anna = "Nazwa: Anna" in request["messages"][0]["content"]
+        gemini = "systemInstruction" in request
+        system = (
+            request["systemInstruction"]["parts"][0]["text"]
+            if gemini
+            else request["messages"][0]["content"]
+        )
+        is_anna = "Nazwa: Anna" in system
         text = (
             "Uważam, że przed pożyczeniem moich rzeczy należy zapytać. "
             "Potrzebowałam długopisu i nie wiedziałam, gdzie go szukać. "
@@ -23,7 +29,12 @@ class BrowserTestProvider:
             "zwykłej rzeczy jest w porządku. Twój argument o dostępności jest jednak przekonujący. "
             "Następnym razem zapytam lub skorzystam z długopisu ze wspólnej szuflady."
         )
-        if request["reasoning_effort"] != "none":
+        reasoning = (
+            request["generationConfig"]["thinkingConfig"]["includeThoughts"]
+            if gemini
+            else request["reasoning_effort"] != "none"
+        )
+        if reasoning:
             yield {"reasoning": "Testowy materiał do analizy — nie trafia do kontekstu rozmówcy."}
         for word in text.split(" "):
             await asyncio.sleep(0.08)
@@ -43,6 +54,7 @@ if __name__ == "__main__":
     data_dir.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=data_dir) as temporary:
         application = create_app(
-            str(Path(temporary) / "ui.sqlite3"), provider=BrowserTestProvider()
+            str(Path(temporary) / "ui.sqlite3"),
+            provider={"groq": BrowserTestProvider(), "gemini": BrowserTestProvider()},
         )
         uvicorn.run(application, host="127.0.0.1", port=8765, timeout_graceful_shutdown=2)

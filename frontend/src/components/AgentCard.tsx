@@ -1,16 +1,18 @@
 import { BrainCircuit, SlidersHorizontal } from 'lucide-react'
-import type { Agent, Settings, Traits } from '../types'
+import type { Agent, ProviderId, Settings, Traits } from '../types'
 import { Checkbox, Field, Input, Slider, Textarea } from './ui'
 
 export function AgentCard({
   agent,
   index,
   settings,
+  provider,
   onChange,
 }: {
   agent: Agent
   index: number
   settings: Settings
+  provider: ProviderId
   onChange: (value: Agent) => void
 }) {
   function change<K extends keyof Agent>(key: K, value: Agent[K]) {
@@ -124,7 +126,9 @@ export function AgentCard({
             <BrainCircuit size={16} /> Włącz reasoning
           </Checkbox>
           <p className="subtle">
-            Dodatkowy tekst modelu jest zapisywany osobno i nie trafia do rozmówcy.
+            {provider === 'gemini'
+              ? 'Zapisuje podsumowania rozumowania i ustawia thinking na niski poziom. Bez zaznaczenia: minimalny thinking, bez podsumowań. Gemini nie gwarantuje całkowitego wyłączenia thinking.'
+              : 'Dodatkowy tekst modelu jest zapisywany osobno i nie trafia do rozmówcy.'}
           </p>
         </div>
       </details>

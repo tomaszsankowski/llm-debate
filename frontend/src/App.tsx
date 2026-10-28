@@ -98,7 +98,7 @@ export default function App() {
             Przestrzeń na argumenty.
           </p>
           <div className="model-line">
-            Groq <span>·</span> Qwen
+            Groq <span>·</span> Gemini
           </div>
           <small>
             Dane zapisują się lokalnie.
@@ -121,8 +121,11 @@ export default function App() {
               {error
                 ? 'Brak połączenia'
                 : health?.api_key_configured
-                  ? 'Klucz Groq skonfigurowany'
-                  : 'Groq · brak klucza'}
+                  ? settings?.providers
+                      .filter((item) => health.providers[item.id])
+                      .map((item) => item.label)
+                      .join(' · ') + ' · klucz gotowy'
+                  : 'Brak kluczy API'}
             </div>
             <ThemeToggle />
           </div>

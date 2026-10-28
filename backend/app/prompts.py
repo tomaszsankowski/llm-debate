@@ -1,6 +1,6 @@
 """Stałe opisy cech; eksport przechowuje wersję i faktycznie wysłane instrukcje."""
 
-from .models import MODEL_ID, DebateConfig
+from .models import DebateConfig
 
 PROMPT_VERSION = "1.1.0"
 LEVELS = ["bardzo niski", "niski", "umiarkowany", "wysoki", "bardzo wysoki"]
@@ -134,8 +134,35 @@ def build_request(config: DebateConfig, index: int, messages: list[dict]) -> dic
     )
     history.append({"role": "user", "content": f"Zadanie bieżącej tury: {task}"})
     agent = config.agents[index]
+    if config.provider == "gemini":
+        contents = []
+        # Reconstruct the opening request when this agent supplied the first reply.
+        # Gemini chat histories should begin with a user turn, not a model turn.
+        if history[1]["role"] == "assistant":
+            contents.append(
+                {"role": "user", "parts": [{"text": f"Zadanie bieżącej tury: {config.opening}"}]}
+            )
+        for message in history[1:]:
+            role = "model" if message["role"] == "assistant" else "user"
+            part = {"text": message["content"]}
+            if contents and contents[-1]["role"] == role:
+                contents[-1]["parts"].append(part)
+            else:
+                contents.append({"role": role, "parts": [part]})
+        return {
+            "model": config.model,
+            "systemInstruction": {"parts": [{"text": history[0]["content"]}]},
+            "contents": contents,
+            "generationConfig": {
+                "maxOutputTokens": agent.max_tokens,
+                "thinkingConfig": {
+                    "thinkingLevel": "low" if agent.reasoning else "minimal",
+                    "includeThoughts": agent.reasoning,
+                },
+            },
+        }
     return {
-        "model": MODEL_ID,
+        "model": config.model,
         "messages": history,
         "max_completion_tokens": agent.max_tokens,
         "reasoning_effort": "low" if agent.reasoning else "none",

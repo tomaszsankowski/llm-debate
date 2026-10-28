@@ -11,7 +11,7 @@ import {
   SkipForward,
   Square,
 } from 'lucide-react'
-import { api, date } from '../api/client'
+import { api, date, navigate } from '../api/client'
 import { AttemptDetails } from '../components/AttemptDetails'
 import { ConfigDetails } from '../components/ConfigDetails'
 import { outcomeLabels, StatusBadge } from '../components/StatusBadge'
@@ -47,6 +47,10 @@ export function Conversation({
     source.addEventListener('snapshot', (event) => {
       accept(JSON.parse((event as MessageEvent).data))
       setDisconnected(false)
+    })
+    source.addEventListener('deleted', () => {
+      source.close()
+      if (alive) navigate('/history')
     })
     source.onerror = () => {
       if (alive) setDisconnected(true)

@@ -8,9 +8,9 @@ from contextlib import aclosing, suppress
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from .groq_client import ProviderError
-from .models import MODEL_ID, Annotation, DebateConfig
+from .models import PROVIDERS, Annotation, DebateConfig
 from .prompts import PROMPT_VERSION, build_request
+from .provider import ProviderError
 from .storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,12 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def rate_limit_delay(retry: int, retry_after: float | None) -> float:
+    # Slow down after repeated refusals, but never retry before the provider allows it.
+    backoff = min(60 * 2 ** min(retry - 1, 3), 300)
+    return max(backoff, (retry_after or 0) + 2)
+
+
 class Conflict(Exception):
     pass
 
@@ -28,7 +34,7 @@ class Conflict(Exception):
 class Engine:
     def __init__(self, storage: Storage, provider):
         self.storage = storage
-        self.provider = provider
+        self.providers = provider if isinstance(provider, dict) else {"groq": provider}
         self.lock = asyncio.Lock()
         self.task: asyncio.Task | None = None
         self.current: dict | None = None
@@ -78,13 +84,17 @@ class Engine:
         if self.active_id:
             raise Conflict("Inna generacja już trwa. Wstrzymaj lub zatrzymaj aktywną debatę.")
 
+    def require_provider(self, provider_id: str):
+        provider = self.providers.get(provider_id)
+        if not provider or not provider.configured:
+            key = PROVIDERS[provider_id]["key_env"]
+            raise Conflict(f"Brak klucza {key}. Uzupełnij .env i odtwórz kontener aplikacji.")
+        return provider
+
     async def create(self, config: DebateConfig) -> dict:
         async with self.lock:
             self.check_idle()
-            if not self.provider.configured:
-                raise Conflict(
-                    "Brak klucza GROQ_API_KEY. Uzupełnij .env i uruchom aplikację ponownie."
-                )
+            self.require_provider(config.provider)
             timestamp = now()
             first = (
                 secrets.randbelow(2)
@@ -98,8 +108,8 @@ class Engine:
                 "created_at": timestamp,
                 "updated_at": timestamp,
                 "revision": 0,
-                "provider": "groq",
-                "model": MODEL_ID,
+                "provider": config.provider,
+                "model": config.model,
                 "config": config.model_dump(mode="json"),
                 "first_agent": first,
                 "status": "paused",
@@ -131,8 +141,7 @@ class Engine:
                     raise Conflict(
                         "Ta debata jest zakończona. Można użyć jej ustawień w nowej debacie."
                     )
-                if not self.provider.configured:
-                    raise Conflict("Brak klucza GROQ_API_KEY.")
+                self.require_provider(debate["provider"])
                 self.launch(debate, step=action == "step")
             elif action == "pause":
                 if self.active_id != debate_id:
@@ -151,6 +160,17 @@ class Engine:
                 debate.update(status="stopped", reason="Zatrzymano ręcznie.", retry_at=None)
                 self.save(debate)
             return self.view(debate_id)
+
+    async def delete(self, debate_id: str) -> None:
+        async with self.lock:
+            if self.active_id == debate_id:
+                raise Conflict("Przed usunięciem wstrzymaj lub zatrzymaj debatę.")
+            self.storage.delete(debate_id)
+            if self.current and self.current["id"] == debate_id:
+                self.current = None
+            for queue in self.listeners.get(debate_id, set()):
+                if queue.empty():
+                    queue.put_nowait(True)
 
     def annotate(self, debate_id: str, annotation: Annotation) -> dict:
         debate = self.get(debate_id)
@@ -184,7 +204,8 @@ class Engine:
         started = time.monotonic()
         last_save = started
         try:
-            async with aclosing(self.provider.stream(copy.deepcopy(attempt["request"]))) as stream:
+            provider = self.require_provider(debate["provider"])
+            async with aclosing(provider.stream(copy.deepcopy(attempt["request"]))) as stream:
                 async for chunk in stream:
                     attempt["content"] += chunk.get("content", "")
                     attempt["reasoning"] += chunk.get("reasoning", "")
@@ -236,7 +257,9 @@ class Engine:
         return attempt
 
     async def run(self, debate: dict) -> None:
-        config = DebateConfig.model_validate(debate["config"])
+        config = DebateConfig.model_validate(
+            {**debate["config"], "provider": debate["provider"], "model": debate["model"]}
+        )
         retries = 0
         try:
             while len(debate["messages"]) < config.rounds * 2:
@@ -244,12 +267,12 @@ class Engine:
                 try:
                     attempt = await self.generate(debate, config, index)
                 except ProviderError as error:
-                    if error.code == "rate_limit" and retries < 3:
+                    if error.code == "rate_limit":
                         retries += 1
-                        delay = error.retry_after if error.retry_after is not None else 10
+                        delay = rate_limit_delay(retries, error.retry_after)
                         debate.update(
                             status="waiting",
-                            reason=f"Limit API — ponowienie {retries}/3.",
+                            reason=f"Limit API — oczekiwanie na automatyczne ponowienie nr {retries}.",
                             retry_at=(
                                 datetime.now(timezone.utc) + timedelta(seconds=delay)
                             ).isoformat(),
@@ -321,4 +344,5 @@ class Engine:
                     status="interrupted", reason="Zatrzymano backend.", retry_at=None
                 )
                 self.save(self.current)
-        await self.provider.close()
+        for provider in self.providers.values():
+            await provider.close()

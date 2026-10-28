@@ -6,7 +6,8 @@ Lokalna aplikacja webowa do konfigurowania, prowadzenia i analizowania debat dw�
 
 - Interfejs, instrukcje agentów i debaty w języku polskim.
 - Jasny i ciemny motyw, przełączany ikoną w górnym pasku. Wybór jest zapamiętywany w przeglądarce; przy pierwszym wejściu aplikacja korzysta z preferencji systemu.
-- Dwie strony konfliktu korzystające z tego samego modelu przez API Groq.
+- Dwie strony konfliktu korzystające z tego samego modelu przez API Groq lub Gemini.
+- Wybór dostawcy przed rozpoczęciem debaty, zapisywany wraz z modelem w konfiguracji i eksporcie.
 - Konfiguracja scenariusza, stanowisk, celów i cech obu agentów przed rozpoczęciem rozmowy.
 - Jedna aktywna debata z naprzemiennymi wypowiedziami.
 - Podgląd rozmowy w formie dymków oraz sterowanie jej przebiegiem.
@@ -75,12 +76,16 @@ Każda karta agenta udostępnia limit generacji oraz checkbox włączający reas
 
 | Parametr | Znaczenie | Wartość domyślna |
 |---|---|---|
-| Limit generacji | Maksymalna liczba tokenów generowanych w jednej turze | 2048 |
+| Limit generacji | Maksymalna liczba tokenów generowanych w jednej turze | Groq: 1024; Gemini: 2048 |
 | Reasoning | Checkbox włączający generowanie dodatkowego tekstu rozumowania | Wyłączone |
 
-Limit generacji jest wartością maksymalną, a nie docelową długością wypowiedzi. Obejmuje również reasoning, jeśli jest włączone. Parametr `max_completion_tokens` ogranicza generowanie po stronie API; model może zakończyć wypowiedź wcześniej. Domyślny limit wynosi 2048 tokenów.
+Limit generacji jest wartością maksymalną, a nie docelową długością wypowiedzi. Obejmuje również reasoning, jeśli jest włączone. Parametr `max_completion_tokens` w Groq lub `maxOutputTokens` w Gemini ogranicza generowanie po stronie API; model może zakończyć wypowiedź wcześniej. Domyślny limit wynosi 1024 tokeny w Groq i 2048 w Gemini. Zmiana dostawcy dostosowuje domyślną wartość; ręcznie ustawione inne limity pozostają zachowane. Zapisane debaty i odtworzone formularze zachowują swoje wcześniejsze wartości.
 
-Checkbox wyłącza reasoning przez `reasoning_effort: none` albo włącza je przez `reasoning_effort: low`. Parametr `reasoning_format: parsed` oddziela tekst rozumowania od publicznej odpowiedzi. Pozostałe parametry generowania, w tym temperatura, top-p i seed, korzystają z ustawień domyślnych API i nie są nadpisywane przez aplikację.
+W Groq checkbox wyłącza reasoning przez `reasoning_effort: none` albo włącza je przez `reasoning_effort: low`. Parametr `reasoning_format: parsed` oddziela tekst rozumowania od publicznej odpowiedzi.
+
+W Gemini checkbox ustawia `thinkingLevel: low` i `includeThoughts: true`, prosząc o podsumowania rozumowania. Bez zaznaczenia ustawiane jest `thinkingLevel: minimal` i `includeThoughts: false`. Model Gemini nie gwarantuje całkowitego wyłączenia wewnętrznego thinking. Podsumowania, jeśli zostaną zwrócone, są zapisywane w tym samym osobnym polu reasoning co w Groq.
+
+Pozostałe parametry generowania, w tym temperatura, top-p i seed, korzystają z ustawień domyślnych API i nie są nadpisywane przez aplikację.
 
 Limit generacji można ustawić w zakresie 128–16384 tokenów, a liczbę rund w zakresie 1–100.
 
@@ -97,7 +102,7 @@ Cechy zachowania są przekazywane w instrukcjach agentów, niezależnie od param
 
 Wspólna instrukcja określa język polski, zadanie obrony własnego stanowiska i przekonywania rozmówcy oraz zakaz wypowiadania się w imieniu drugiej strony. Agent odnosi się do argumentów przeciwnika i może zmienić zdanie, jeśli uzna je za przekonujące. Rozmowa nie wymaga osiągnięcia kompromisu ani konsensusu; utrzymanie odmiennych stanowisk jest poprawnym wynikiem debaty.
 
-Ustawienia rozpoczętego przebiegu pozostają niezmienne. Opcja **Użyj tych ustawień** tworzy nową konfigurację na podstawie zapisanej debaty.
+Ustawienia rozpoczętego przebiegu pozostają niezmienne, włącznie z dostawcą i modelem. Wznowienie korzysta z tego samego API. Opcja **Użyj tych ustawień** tworzy nową konfigurację na podstawie zapisanej debaty; można w niej wybrać innego dostawcę. Starsze zapisy bez wyboru dostawcy w konfiguracji pozostają debatami Groq.
 
 ### Osobne konteksty
 
@@ -108,7 +113,7 @@ Agent A: wspólne zasady + profil A + publiczna historia + zadanie bieżącej tu
 Agent B: wspólne zasady + profil B + publiczna historia + zadanie bieżącej tury
 ```
 
-Każdy agent otrzymuje własne wcześniejsze wypowiedzi jako wiadomości `assistant`, a wypowiedzi rozmówcy jako wiadomości `user`, z oznaczeniem autora w treści. Profile drugiej strony, notatki badacza i reasoning nie są włączane do publicznej historii przekazywanej modelowi.
+Każdy agent otrzymuje własne wcześniejsze wypowiedzi w roli `assistant` w Groq lub `model` w Gemini, a wypowiedzi rozmówcy w roli `user`, z oznaczeniem autora w treści. W Gemini sąsiadujące fragmenty tej samej roli są łączone w jedną wiadomość z zachowaniem treści i kolejności. Dla agenta rozpoczynającego odtwarzane jest również jego pierwotne zadanie otwarcia, aby historia zaczynała się od roli `user`. Profile drugiej strony, notatki badacza i reasoning nie są włączane do publicznej historii przekazywanej modelowi.
 
 Historia jest przechowywana przez aplikację i przesyłana w wywołaniach API. Do obsługi dwóch agentów wystarcza jeden klucz API i jeden model. Generowanie odbywa się kolejno.
 
@@ -123,11 +128,12 @@ Reasoning stanowi dodatkowy materiał do analizy. Nie jest traktowane jako pewny
 ### Nowa debata
 
 - Formularz wspólnego scenariusza.
+- Wybór dostawcy i modelu dla obu agentów: Groq z Qwen lub Gemini z Flash-Lite.
 - Dwie karty agentów obok siebie.
 - Suwaki cech z opisami znaczenia wartości.
 - Pole limitu generacji i checkbox reasoning dla każdej strony.
 - Podgląd instrukcji wynikowych.
-- Przycisk rozpoczęcia debaty i informacja o konfiguracji połączenia z Groq.
+- Przycisk rozpoczęcia debaty i informacja o konfiguracji klucza wybranego dostawcy.
 - Przykładowe konfiguracje: polityka migracyjna oraz spór o pożyczony długopis.
 - Automatyczny zapis roboczego formularza w przeglądarce i przycisk jego wyczyszczenia.
 
@@ -158,6 +164,7 @@ Reasoning stanowi dodatkowy materiał do analizy. Nie jest traktowane jako pewny
 - Krótkie notatki do debaty.
 - Ręczne oznaczenie wyniku: nieocenione, konsensus, częściowa zgodność lub brak konsensusu.
 - Pobranie pojedynczej debaty jako pliku JSON.
+- Usunięcie debaty wraz z wypowiedziami, próbami generowania i notatkami po potwierdzeniu. Aktywny przebieg wymaga najpierw pauzy lub zatrzymania.
 
 Ocena wyniku jest oddzielona od statusu wykonania. Aplikacja nie rozpoznaje konsensusu automatycznie na podstawie treści wypowiedzi. Notatki i ocena badacza nie są przekazywane agentom.
 
@@ -187,6 +194,7 @@ flowchart LR
     UI[Przeglądarka: React] -->|REST i SSE| API[Lokalny backend: FastAPI]
     API --> DB[(SQLite)]
     API -->|HTTPS| GROQ[Groq API: Qwen]
+    API -->|HTTPS| GEMINI[Gemini API: Flash-Lite]
 ```
 
 | Element | Technologia | Odpowiedzialność |
@@ -194,12 +202,21 @@ flowchart LR
 | Interfejs | React, TypeScript, Vite | Formularze, widok rozmowy i historia |
 | Komponenty interfejsu | Lokalne komponenty w konwencji shadcn/ui, Radix UI, Tailwind CSS | Pola, suwaki, przyciski, rozwijane panele i style |
 | Backend | Python, FastAPI, Pydantic | Walidacja danych, sterowanie debatą i lokalne API |
-| Komunikacja z modelem | Oficjalny klient Groq dla Pythona | Wywołania API i odbieranie odpowiedzi |
+| Komunikacja z modelem | Oficjalny klient Groq dla Pythona i HTTPX dla Gemini REST API | Wywołania API, strumieniowanie i wspólny format wyników |
 | Dane | SQLite | Przebiegi, konfiguracje, wiadomości i metadane |
 | Aktualizacje interfejsu | Server-Sent Events (SSE) | Przesyłanie tekstu i statusów do przeglądarki |
 | Uruchamianie | Docker, Docker Compose | Budowanie aplikacji, uruchomienie kontenera i trwały zapis danych |
 
-Aplikacja korzysta z modelu `qwen/qwen3.8-27b` w darmowym planie Groq. Model działa u dostawcy; lokalne środowisko nie wymaga GPU ani pobierania wag. Dostęp wymaga połączenia z internetem, konta Groq i klucza API.
+Aplikacja udostępnia dwa warianty:
+
+| Dostawca | Model | Zmienna z kluczem |
+|---|---|---|
+| Groq | `qwen/qwen3.8-27b` | `GROQ_API_KEY` |
+| Gemini | `gemini-3.5-flash-lite` | `GEMINI_API_KEY` |
+
+Modele działają u dostawców; lokalne środowisko nie wymaga GPU ani pobierania wag. Do generowania wystarczy klucz jednego z dostawców. Formularz pokazuje obie opcje, a rozpoczęcie wymaga klucza wybranej usługi. Aplikacja nie przełącza API automatycznie po błędzie.
+
+Wybrane modele są oferowane również w darmowych warstwach API, z limitami zależnymi od konta i modelu. Rozliczenie wynika z ustawień projektu u dostawcy; aplikacja nie aktywuje płatnego planu ani nie narzuca darmowej warstwy. Abonament aplikacji Gemini lub Google AI Pro nie określa sam w sobie limitów API.
 
 Docker Compose uruchamia jedną usługę aplikacji. Podczas budowania obrazu frontend jest kompilowany, a jego gotowe pliki kopiowane do obrazu z backendem. Backend udostępnia zarówno interfejs, jak i API. SQLite jest bazą plikową używaną przez backend i nie wymaga osobnego kontenera.
 
@@ -207,13 +224,13 @@ Backend działa jako jeden proces, nasłuchuje wewnątrz kontenera na `0.0.0.0:8
 
 Baza SQLite znajduje się w katalogu `/app/data` kontenera, zamontowanym jako trwały wolumin `debate-data`. Dane pozostają dostępne po zatrzymaniu lub odtworzeniu kontenera.
 
-Klucz jest wczytywany ze zmiennej środowiskowej `GROQ_API_KEY` po stronie backendu. Docker Compose przekazuje go z lokalnego pliku `.env`. Nie jest przesyłany do interfejsu ani umieszczany w obrazie aplikacji. Plik `.env` jest wyłączony z repozytorium i z kontekstu budowania obrazu.
+Klucze są wczytywane ze zmiennych środowiskowych `GROQ_API_KEY` i `GEMINI_API_KEY` po stronie backendu. Docker Compose przekazuje je z lokalnego pliku `.env`. Nie są przesyłane do interfejsu, do zapisów debat ani umieszczane w obrazie aplikacji. Plik `.env` jest wyłączony z repozytorium i z kontekstu budowania obrazu. Interfejs otrzymuje wyłącznie informację, czy dany klucz jest skonfigurowany.
 
 ### Uruchamianie
 
-Wymagane są Docker z obsługą Docker Compose, połączenie z internetem oraz klucz API Groq.
+Wymagane są Docker z obsługą Docker Compose, połączenie z internetem oraz klucz API Groq lub Gemini.
 
-1. Skopiować `.env.example` do `.env` i uzupełnić `GROQ_API_KEY`.
+1. Skopiować `.env.example` do `.env` i uzupełnić `GROQ_API_KEY`, `GEMINI_API_KEY` lub oba. Klucz Gemini można utworzyć w [Google AI Studio](https://aistudio.google.com/apikey).
 2. W katalogu repozytorium uruchomić:
 
    ```sh
@@ -224,7 +241,7 @@ Wymagane są Docker z obsługą Docker Compose, połączenie z internetem oraz k
 
 Zatrzymanie aplikacji poleceniem `docker compose down` zachowuje zapisane debaty w woluminie.
 
-Po zmianie klucza w `.env` należy wykonać `docker compose up -d --force-recreate`. Sam restart kontenera nie wczytuje zmiennych ponownie. Bez klucza dostępne są formularze, podgląd instrukcji, historia i eksport; uruchamianie debat jest zablokowane.
+Po zmianie kluczy w `.env` należy wykonać `docker compose up -d --force-recreate`. Sam restart kontenera nie wczytuje zmiennych ponownie. Bez kluczy dostępne są formularze, podgląd instrukcji, historia i eksport; uruchamianie debat jest zablokowane. Brak klucza Gemini nie blokuje debat Groq i odwrotnie.
 
 Stan kontenera można sprawdzić przez `docker compose ps`, a logi przez `docker compose logs -f app`. Dokumentacja lokalnego API jest dostępna pod adresem `http://localhost:8000/docs`.
 
@@ -232,8 +249,10 @@ Stan kontenera można sprawdzić przez `docker compose ps`, a logi przez `docker
 
 Darmowe API ma limity zapytań oraz tokenów. Obejmują one wspólnie wywołania obu agentów. Ponowne przesyłanie historii przy kolejnych turach również zużywa pulę wejściową.
 
-- Przy tymczasowym ograniczeniu API aplikacja pokazuje oczekiwanie i respektuje wskazany przez dostawcę czas ponowienia.
-- Po maksymalnie trzech automatycznych ponowieniach przebieg przechodzi w stan błędu z możliwością ręcznego wznowienia.
+- Przy tymczasowym ograniczeniu API aplikacja automatycznie ponawia żądanie po 1, 2, 4, a następnie co 5 minut. Jeśli dostawca wskazuje dłuższy czas oczekiwania, aplikacja respektuje go z dwusekundowym zapasem.
+- Oczekiwanie pokazuje termin następnej próby i nie kończy się po ustalonej liczbie odmów. Pauza i zatrzymanie przerywają je od razu. Po udanej wypowiedzi odstępy ponowień wracają do wartości początkowej.
+- Żądanie jawnie odrzucone jako zbyt duże zatrzymuje przebieg z osobnym komunikatem. Samo czekanie nie usuwa tego ograniczenia; historia pozostaje zachowana w całości.
+- W Gemini odczytywane są zarówno nagłówek `Retry-After`, jak i czas z `google.rpc.RetryInfo`. Zablokowana przez dostawcę odpowiedź pozostaje nieudaną próbą i nie trafia do kontekstu rozmówcy.
 - Błędy uwierzytelnienia, niedostępność modelu i zbyt długie żądanie są pokazywane z czytelną przyczyną.
 - Nieukończony tekst pozostaje zapisaną próbą i nie jest przekazywany drugiemu agentowi.
 - Historia nie jest automatycznie skracana ani streszczana.
@@ -273,13 +292,15 @@ llm-debate/
 │   │   ├── simulation.py     # kolejność tur i sterowanie przebiegiem
 │   │   ├── prompts.py        # instrukcje, cechy i składanie kontekstów
 │   │   ├── groq_client.py    # wywołania modelu i odbiór odpowiedzi
+│   │   ├── gemini_client.py  # Gemini REST API i normalizacja odpowiedzi SSE
+│   │   ├── provider.py       # wspólne błędy i odczyt Retry-After
 │   │   └── storage.py        # zapis i odczyt SQLite
 │   └── tests/                # przebieg debat, konteksty i zapis danych
 ├── .env.example              # nazwy wymaganych zmiennych bez sekretów
 └── .gitignore
 ```
 
-Podział rozdziela interfejs, przebieg rozmowy, składanie instrukcji, komunikację z Groq i zapis danych. Eksport JSON korzysta z danych zapisanych przez backend. Projekt nie wymaga osobnego serwera bazy ani dodatkowego systemu kolejek.
+Podział rozdziela interfejs, przebieg rozmowy, składanie instrukcji, adaptery dostawców i zapis danych. Silnik używa wspólnego formatu fragmentów odpowiedzi, reasoning, błędów i statystyk tokenów. Próby zapisują żądanie w formacie danego API; w Gemini pole `model` wskazuje model w adresie endpointu, a pozostałe pola stanowią ciało JSON. Oryginalne statystyki Gemini są zachowane w `usage.provider_usage`, a wspólne `completion_tokens` obejmują również tokeny thinking. Eksport JSON korzysta z danych zapisanych przez backend. Projekt nie wymaga osobnego serwera bazy ani dodatkowego systemu kolejek.
 
 ## Praca z kodem i testy
 
@@ -305,8 +326,8 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-Testy backendu obejmują kolejność i limit tur, izolację profili oraz reasoning, pauzę i pojedynczy krok, zatrzymanie, ponowienia po limitach API, odzyskiwanie po restarcie, walidację i eksport. Testy adaptera korzystają z rzeczywistego klienta Groq oraz kontrolowanych odpowiedzi HTTP.
+Testy backendu obejmują kolejność i limit tur, izolację profili oraz reasoning, pauzę i pojedynczy krok, zatrzymanie, ponowienia po limitach API, odzyskiwanie po restarcie, walidację i eksport. Testy adapterów korzystają z klienta Groq oraz HTTPX z kontrolowanymi odpowiedziami HTTP. Sprawdzają również osobne klucze, wybór dostawcy przy wznowieniu i zgodność ze starszymi zapisami.
 
-Testy przeglądarkowe uruchamiają osobny backend na porcie `8765`, z tymczasową bazą i deterministycznym dostawcą zdefiniowanym wyłącznie w `backend/tests/ui_server.py`. Sprawdzają formularz, strumieniowanie, sterowanie, zapis notatek, historię, eksport i mały ekran. Nie wymagają klucza ani nie wysyłają zapytań do Groq. Rzeczywiste generowanie wymaga klucza API.
+Testy przeglądarkowe uruchamiają osobny backend na porcie `8765`, z tymczasową bazą i deterministycznymi dostawcami zdefiniowanymi wyłącznie w `backend/tests/ui_server.py`. Sprawdzają formularz, strumieniowanie, sterowanie, zapis notatek, historię, eksport, wybór Groq lub Gemini i mały ekran. Nie wymagają kluczy ani nie wysyłają zapytań do usług zewnętrznych. Rzeczywiste generowanie wymaga klucza API.
 
-Podczas pracy nad interfejsem można uruchomić `uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000` z katalogu repozytorium oraz `npm run dev` z `frontend/`. Vite przekazuje zapytania `/api` do backendu. Klucz Groq należy wtedy ustawić jako zmienną środowiskową procesu backendu; plik `.env` jest automatycznie odczytywany przez Docker Compose, a nie przez ten bezpośredni start.
+Podczas pracy nad interfejsem można uruchomić `uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000` z katalogu repozytorium oraz `npm run dev` z `frontend/`. Vite przekazuje zapytania `/api` do backendu. Klucze wybranych dostawców należy wtedy ustawić jako zmienne środowiskowe procesu backendu; plik `.env` jest automatycznie odczytywany przez Docker Compose, a nie przez ten bezpośredni start.

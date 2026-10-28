@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowRight, Download, History as HistoryIcon, Plus, Search } from 'lucide-react'
+import { ArrowRight, Download, History as HistoryIcon, Plus, Search, Trash2 } from 'lucide-react'
 import { api, date } from '../api/client'
 import { outcomeLabels, StatusBadge } from '../components/StatusBadge'
 import { Button, Input, Loading, Notice } from '../components/ui'
@@ -9,6 +9,25 @@ export function History() {
   const [items, setItems] = useState<Summary[] | null>(null)
   const [query, setQuery] = useState('')
   const [error, setError] = useState('')
+  const [deleting, setDeleting] = useState<string | null>(null)
+  async function deleteDebate(item: Summary) {
+    if (
+      !window.confirm(
+        `Usunąć debatę „${item.name}”? Rozmowa, próby generowania i notatki zostaną trwale usunięte.`,
+      )
+    )
+      return
+    setDeleting(item.id)
+    setError('')
+    try {
+      await api<void>(`/debates/${item.id}`, { method: 'DELETE' })
+      setItems((current) => current?.filter((entry) => entry.id !== item.id) ?? null)
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Nie udało się usunąć debaty.')
+    } finally {
+      setDeleting(null)
+    }
+  }
   useEffect(() => {
     let alive = true
     const load = () =>
@@ -143,6 +162,23 @@ export function History() {
                         >
                           <Download size={17} />
                         </a>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          title={
+                            ['running', 'pausing', 'waiting'].includes(item.status)
+                              ? 'Najpierw wstrzymaj lub zatrzymaj debatę'
+                              : 'Usuń debatę'
+                          }
+                          aria-label={`Usuń: ${item.name}`}
+                          disabled={
+                            deleting !== null ||
+                            ['running', 'pausing', 'waiting'].includes(item.status)
+                          }
+                          onClick={() => void deleteDebate(item)}
+                        >
+                          <Trash2 size={17} />
+                        </button>
                         <a
                           className="icon-button"
                           title="Otwórz debatę"

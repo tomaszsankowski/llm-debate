@@ -3,8 +3,9 @@ import json
 
 import pytest
 
-from app.groq_client import ProviderError
+from app import simulation
 from app.models import Annotation
+from app.provider import ProviderError
 from app.simulation import Conflict, Engine, now
 from app.storage import Storage
 from tests.helpers import FakeProvider, config, finish
@@ -86,6 +87,52 @@ async def test_stop_records_partial_without_public_turn(storage):
     assert engine.active_id is None
 
 
+async def test_provider_is_preserved_on_resume_and_all_clients_are_closed(storage):
+    groq = FakeProvider()
+    gemini = FakeProvider(block=True)
+    engine = Engine(storage, {"groq": groq, "gemini": gemini})
+    debate = await engine.create(config(provider="gemini", rounds=2))
+    await gemini.started.wait()
+    await engine.control(debate["id"], "pause")
+    gemini.release.set()
+    await finish(engine)
+    assert len(engine.get(debate["id"])["messages"]) == 1
+    await engine.control(debate["id"], "resume")
+    await finish(engine)
+    result = storage.get(debate["id"])
+    assert result["provider"] == result["config"]["provider"] == "gemini"
+    assert result["model"] == result["config"]["model"] == "gemini-3.5-flash-lite"
+    assert len(gemini.requests) == 4
+    assert groq.requests == []
+    for attempt in result["attempts"]:
+        assert attempt["request"]["model"] == result["model"]
+        assert "TAJNY_TEKST_ROZUMOWANIA" not in json.dumps(attempt["request"])
+    await engine.close()
+    assert groq.closed and gemini.closed
+
+
+async def test_legacy_debate_resumes_on_groq(storage):
+    first = Engine(storage, FakeProvider([ProviderError("connection", "Przerwane połączenie")]))
+    debate = await first.create(config(rounds=1))
+    await finish(first)
+    await first.close()
+    archived = storage.get(debate["id"])
+    archived["config"].pop("provider")
+    archived["config"].pop("model")
+    for agent in archived["config"]["agents"]:
+        agent["max_tokens"] = 2048
+    storage.save(archived)
+    groq, gemini = FakeProvider(), FakeProvider()
+    engine = Engine(storage, {"groq": groq, "gemini": gemini})
+    await engine.control(debate["id"], "resume")
+    await finish(engine)
+    assert engine.get(debate["id"])["status"] == "completed"
+    assert len(groq.requests) == 2
+    assert all(request["max_completion_tokens"] == 2048 for request in groq.requests)
+    assert gemini.requests == []
+    await engine.close()
+
+
 async def test_stop_before_worker_starts_and_double_start(storage):
     engine = Engine(storage, FakeProvider(block=True))
     debate = await engine.create(config(rounds=1))
@@ -96,25 +143,49 @@ async def test_stop_before_worker_starts_and_double_start(storage):
     assert engine.active_id is None
 
 
-async def test_rate_limit_three_retries_then_manual_resume(storage):
-    provider = FakeProvider([ProviderError("rate_limit", "Limit", 0) for _ in range(4)])
+def test_rate_limit_backoff_respects_longer_provider_delay():
+    assert [simulation.rate_limit_delay(n, None) for n in range(1, 7)] == [
+        60,
+        120,
+        240,
+        300,
+        300,
+        300,
+    ]
+    assert simulation.rate_limit_delay(1, 0) == 60
+    assert simulation.rate_limit_delay(1, 90) == 92
+    assert simulation.rate_limit_delay(8, 3600) == 3602
+    assert simulation.rate_limit_delay(10000, None) == 300
+
+
+async def test_rate_limit_keeps_retrying_and_resets_after_success(storage, monkeypatch):
+    delays = []
+    original_delay = simulation.rate_limit_delay
+
+    def record_delay(retry, retry_after):
+        delays.append(original_delay(retry, retry_after))
+        return 0  # Exercise the actual retry loop without waiting several minutes.
+
+    monkeypatch.setattr(simulation, "rate_limit_delay", record_delay)
+    provider = FakeProvider(
+        [ProviderError("rate_limit", "Limit") for _ in range(5)]
+        + [{}, ProviderError("rate_limit", "Limit")]
+    )
     engine = Engine(storage, provider)
     debate = await engine.create(config(rounds=1))
     await finish(engine)
-    result = engine.get(debate["id"])
-    assert result["status"] == "error"
-    assert len(result["attempts"]) == 4
-    assert len(result["messages"]) == 0
-    await engine.control(debate["id"], "resume")
-    await finish(engine)
     result = storage.get(debate["id"])
+    assert result["status"] == "completed"
     assert len(result["messages"]) == 2
-    assert len(result["attempts"]) == 6
-    assert result["attempts"][4]["number"] == 5
-    assert result["attempts"][5]["number"] == 1
+    assert len(result["attempts"]) == 8
+    assert [a["number"] for a in result["attempts"]] == [1, 2, 3, 4, 5, 6, 1, 2]
+    assert delays == [60, 120, 240, 300, 300, 60]
+    assert [m["agent_index"] for m in result["messages"]] == [0, 1]
+    assert all(request == provider.requests[0] for request in provider.requests[:6])
 
 
-async def test_wait_can_be_paused_and_stopped_without_waiting(storage):
+@pytest.mark.parametrize("action, status", [("pause", "paused"), ("stop", "stopped")])
+async def test_wait_can_be_paused_and_stopped_without_waiting(storage, action, status):
     engine = Engine(storage, FakeProvider([ProviderError("rate_limit", "Limit", 3600)]))
     debate = await engine.create(config(rounds=1))
     for _ in range(100):
@@ -123,10 +194,26 @@ async def test_wait_can_be_paused_and_stopped_without_waiting(storage):
         await asyncio.sleep(0)
     assert engine.get(debate["id"])["status"] == "waiting"
     assert engine.get(debate["id"])["retry_at"]
-    await engine.control(debate["id"], "pause")
-    await finish(engine)
-    assert engine.get(debate["id"])["status"] == "paused"
+    await engine.control(debate["id"], action)
+    if action == "pause":
+        await finish(engine)
+    assert engine.get(debate["id"])["status"] == status
     assert engine.get(debate["id"])["retry_at"] is None
+    assert len(engine.get(debate["id"])["attempts"]) == 1
+    assert engine.active_id is None
+
+
+async def test_oversized_request_stops_without_retrying(storage):
+    provider = FakeProvider([ProviderError("request_too_large", "Żądanie jest zbyt duże.")])
+    engine = Engine(storage, provider)
+    debate = await engine.create(config(rounds=1))
+    await finish(engine)
+    result = storage.get(debate["id"])
+    assert result["status"] == "error"
+    assert result["reason"] == "Żądanie jest zbyt duże."
+    assert result["retry_at"] is None
+    assert len(result["attempts"]) == 1
+    assert result["messages"] == []
 
 
 @pytest.mark.parametrize(
@@ -179,7 +266,7 @@ async def test_annotations_and_restart_preserve_transcript(tmp_path):
 async def test_recover_after_unclean_exit(storage):
     engine = Engine(storage, FakeProvider(block=True))
     debate = await engine.create(config(rounds=1))
-    await engine.provider.started.wait()
+    await engine.providers["groq"].started.wait()
     engine.save(engine.get(debate["id"]))
     saved = storage.get(debate["id"])
     await engine.close()
@@ -206,7 +293,8 @@ async def test_concurrent_starts_and_event_subscriptions(storage):
     await engine.control(debate["id"], "stop")
 
 
-async def test_single_step_retries_rate_limit_then_pauses(storage):
+async def test_single_step_retries_rate_limit_then_pauses(storage, monkeypatch):
+    monkeypatch.setattr(simulation, "rate_limit_delay", lambda retry, retry_after: 0)
     provider = FakeProvider(block=True)
     engine = Engine(storage, provider)
     debate = await engine.create(config(rounds=2))

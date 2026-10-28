@@ -31,6 +31,12 @@ class Storage:
             raise KeyError(debate_id)
         return json.loads(row[0])
 
+    def delete(self, debate_id: str) -> None:
+        with self.connection:
+            cursor = self.connection.execute("DELETE FROM debates WHERE id=?", (debate_id,))
+            if cursor.rowcount == 0:
+                raise KeyError(debate_id)
+
     def list(self) -> list[dict]:
         rows = self.connection.execute(
             "SELECT id, json_extract(data, '$.config.name'), "
