@@ -98,7 +98,7 @@ export default function App() {
             Przestrzeń na argumenty.
           </p>
           <div className="model-line">
-            Groq <span>·</span> Gemini
+            Gemini <span>·</span> Flash-Lite
           </div>
           <small>
             Dane zapisują się lokalnie.
@@ -121,11 +121,8 @@ export default function App() {
               {error
                 ? 'Brak połączenia'
                 : health?.api_key_configured
-                  ? settings?.providers
-                      .filter((item) => health.providers[item.id])
-                      .map((item) => item.label)
-                      .join(' · ') + ' · klucz gotowy'
-                  : 'Brak kluczy API'}
+                  ? 'Gemini · klucz gotowy'
+                  : 'Gemini · brak klucza'}
             </div>
             <ThemeToggle />
           </div>

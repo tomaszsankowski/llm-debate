@@ -1,6 +1,6 @@
 """Stałe opisy cech; eksport przechowuje wersję i faktycznie wysłane instrukcje."""
 
-from .models import DebateConfig
+from .models import MODEL_ID, DebateConfig
 
 PROMPT_VERSION = "1.1.0"
 LEVELS = ["bardzo niski", "niski", "umiarkowany", "wysoki", "bardzo wysoki"]
@@ -114,15 +114,26 @@ DODATKOWE INSTRUKCJE
 {agent.instructions or "(brak)"}"""
 
 
-def build_request(config: DebateConfig, index: int, messages: list[dict]) -> dict:
-    history = [{"role": "system", "content": system_prompt(config, index)}]
+def build_request(
+    config: DebateConfig, index: int, messages: list[dict], model: str = MODEL_ID
+) -> dict:
+    contents = []
+
+    def add_content(role: str, text: str) -> None:
+        part = {"text": text}
+        if contents and contents[-1]["role"] == role:
+            contents[-1]["parts"].append(part)
+        else:
+            contents.append({"role": role, "parts": [part]})
+
+    # Reconstruct the opening request before this agent's first model turn.
+    if messages and messages[0]["agent_index"] == index:
+        add_content("user", f"Zadanie bieżącej tury: {config.opening}")
     for message in messages:
         author = config.agents[message["agent_index"]].name
-        history.append(
-            {
-                "role": "assistant" if message["agent_index"] == index else "user",
-                "content": f"[{author}, strona {'AB'[message['agent_index']]}]\n{message['content']}",
-            }
+        add_content(
+            "model" if message["agent_index"] == index else "user",
+            f"[{author}, strona {'AB'[message['agent_index']]}]\n{message['content']}",
         )
     task = (
         config.opening
@@ -132,41 +143,17 @@ def build_request(config: DebateConfig, index: int, messages: list[dict]) -> dic
             "broń swojego stanowiska lub skoryguj je, jeśli zostałeś przekonany."
         )
     )
-    history.append({"role": "user", "content": f"Zadanie bieżącej tury: {task}"})
+    add_content("user", f"Zadanie bieżącej tury: {task}")
     agent = config.agents[index]
-    if config.provider == "gemini":
-        contents = []
-        # Reconstruct the opening request when this agent supplied the first reply.
-        # Gemini chat histories should begin with a user turn, not a model turn.
-        if history[1]["role"] == "assistant":
-            contents.append(
-                {"role": "user", "parts": [{"text": f"Zadanie bieżącej tury: {config.opening}"}]}
-            )
-        for message in history[1:]:
-            role = "model" if message["role"] == "assistant" else "user"
-            part = {"text": message["content"]}
-            if contents and contents[-1]["role"] == role:
-                contents[-1]["parts"].append(part)
-            else:
-                contents.append({"role": role, "parts": [part]})
-        return {
-            "model": config.model,
-            "systemInstruction": {"parts": [{"text": history[0]["content"]}]},
-            "contents": contents,
-            "generationConfig": {
-                "maxOutputTokens": agent.max_tokens,
-                "thinkingConfig": {
-                    "thinkingLevel": "low" if agent.reasoning else "minimal",
-                    "includeThoughts": agent.reasoning,
-                },
-            },
-        }
     return {
-        "model": config.model,
-        "messages": history,
-        "max_completion_tokens": agent.max_tokens,
-        "reasoning_effort": "low" if agent.reasoning else "none",
-        "reasoning_format": "parsed",
-        "stream": True,
-        "stream_options": {"include_usage": True},
+        "model": model,
+        "systemInstruction": {"parts": [{"text": system_prompt(config, index)}]},
+        "contents": contents,
+        "generationConfig": {
+            "maxOutputTokens": agent.max_tokens,
+            "thinkingConfig": {
+                "thinkingLevel": "low" if agent.reasoning else "minimal",
+                "includeThoughts": agent.reasoning,
+            },
+        },
     }

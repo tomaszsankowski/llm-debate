@@ -1,11 +1,38 @@
 """Strumieniowe Gemini REST API; ponowienia wykonuje silnik debaty."""
 
 import json
+import math
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 
-from .provider import ProviderError, retry_delay
+
+class GeminiError(Exception):
+    def __init__(self, code: str, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.retry_after = retry_after
+
+    def as_dict(self) -> dict:
+        return {"code": self.code, "message": self.message, "retry_after": self.retry_after}
+
+
+def retry_delay(headers) -> float | None:
+    raw = headers.get("retry-after", "")
+    try:
+        seconds = float(raw)
+        if math.isfinite(seconds):
+            return max(0, seconds)
+    except ValueError:
+        pass
+    try:
+        deadline = parsedate_to_datetime(raw)
+        return max(0, (deadline - datetime.now(timezone.utc)).total_seconds())
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 async def sse_events(response: httpx.Response) -> AsyncIterator[dict]:
@@ -20,7 +47,7 @@ async def sse_events(response: httpx.Response) -> AsyncIterator[dict]:
         yield json.loads("\n".join(data))
 
 
-def api_error(status: int, body: dict, headers) -> ProviderError:
+def api_error(status: int, body: dict, headers) -> GeminiError:
     # Raw messages can contain prompts or credentials. Only classifications are persisted.
     detail = body.get("error", {})
     if status == 429:
@@ -30,29 +57,29 @@ def api_error(status: int, body: dict, headers) -> ProviderError:
                 raw = item.get("retryDelay", "")
                 if isinstance(raw, str) and raw.endswith("s"):
                     delays.append(retry_delay({"retry-after": raw[:-1]}))
-        return ProviderError(
+        return GeminiError(
             "rate_limit",
             "Osiągnięto limit API Gemini. Oczekiwanie na ponowienie.",
             max((delay for delay in delays if delay is not None), default=None),
         )
     reasons = {item.get("reason") for item in detail.get("details", [])}
     if status == 401 or "API_KEY_INVALID" in reasons:
-        return ProviderError("authentication", "Gemini odrzucił klucz. Sprawdź GEMINI_API_KEY.")
+        return GeminiError("authentication", "Gemini odrzucił klucz. Sprawdź GEMINI_API_KEY.")
     if status == 403:
-        return ProviderError("permission", "Konto Gemini nie ma dostępu do modelu lub projektu.")
+        return GeminiError("permission", "Konto Gemini nie ma dostępu do modelu lub projektu.")
     if status == 404:
-        return ProviderError("model_unavailable", "Wybrany model nie jest dostępny w Gemini.")
+        return GeminiError("model_unavailable", "Wybrany model nie jest dostępny w Gemini.")
     if status == 413:
-        return ProviderError(
+        return GeminiError(
             "request_too_large",
             "Gemini odrzucił zbyt duże żądanie. Samo czekanie nie pomoże. Historia nie została skrócona.",
         )
     if status in {400, 422}:
-        return ProviderError(
+        return GeminiError(
             "invalid_request",
             f"Gemini odrzucił żądanie (HTTP {status}). Sprawdź dostęp do modelu, limit generacji i długość kontekstu. Historia nie została skrócona.",
         )
-    return ProviderError(
+    return GeminiError(
         "provider_error", f"Błąd usługi Gemini (HTTP {status}). Można wznowić debatę."
     )
 
@@ -90,10 +117,10 @@ def parse_chunk(data: dict) -> dict:
     }
 
 
-class GeminiProvider:
+class GeminiClient:
     def __init__(self, api_key: str):
         self.configured = bool(api_key.strip())
-        self.client = (
+        self.http = (
             httpx.AsyncClient(
                 base_url="https://generativelanguage.googleapis.com/v1beta/",
                 headers={"x-goog-api-key": api_key.strip()},
@@ -104,14 +131,14 @@ class GeminiProvider:
         )
 
     async def stream(self, request: dict) -> AsyncIterator[dict]:
-        if not self.client:
-            raise ProviderError(
+        if not self.http:
+            raise GeminiError(
                 "missing_key",
                 "Brak klucza GEMINI_API_KEY. Uzupełnij .env i odtwórz kontener aplikacji.",
             )
         body = {key: value for key, value in request.items() if key != "model"}
         try:
-            async with self.client.stream(
+            async with self.http.stream(
                 "POST",
                 f"models/{request['model']}:streamGenerateContent",
                 params={"alt": "sse"},
@@ -136,21 +163,21 @@ class GeminiProvider:
                         "RECITATION",
                         "SPII",
                     }:
-                        raise ProviderError(
+                        raise GeminiError(
                             "blocked",
                             "Gemini zablokował generowanie odpowiedzi. Próba została zapisana; sprawdź scenariusz i profile agentów.",
                         )
         except httpx.HTTPError:
-            raise ProviderError(
+            raise GeminiError(
                 "connection",
                 "Przerwano połączenie z Gemini lub upłynął czas oczekiwania. Można wznowić debatę.",
             ) from None
         except (ValueError, KeyError, TypeError):
-            raise ProviderError(
+            raise GeminiError(
                 "stream_error",
                 "Gemini zwrócił nieprawidłowy strumień odpowiedzi. Można wznowić debatę.",
             ) from None
 
     async def close(self) -> None:
-        if self.client:
-            await self.client.aclose()
+        if self.http:
+            await self.http.aclose()

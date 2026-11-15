@@ -4,14 +4,21 @@ import json
 import httpx
 import pytest
 
-from app.gemini_client import GeminiProvider
+from app.gemini_client import GeminiClient, GeminiError, retry_delay
 from app.prompts import build_request
-from app.provider import ProviderError
 from tests.helpers import config
 
 
+def test_retry_after_formats():
+    assert retry_delay({"retry-after": "3.5"}) == 3.5
+    assert retry_delay({"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}) == 0
+    assert retry_delay({}) is None
+    assert retry_delay({"retry-after": "NaN"}) is None
+    assert retry_delay({"retry-after": "Infinity"}) is None
+
+
 def test_gemini_request_keeps_profiles_and_public_history_separate():
-    data = config(provider="gemini")
+    data = config()
     history = [
         {"agent_index": 0, "content": "Pierwszy argument."},
         {"agent_index": 1, "content": "Odpowiedź rozmówcy."},
@@ -23,7 +30,7 @@ def test_gemini_request_keeps_profiles_and_public_history_separate():
     assert data.opening in request["contents"][0]["parts"][0]["text"]
     assert len(request["contents"][-1]["parts"]) == 2
     assert request["contents"][1]["parts"][0]["text"].endswith("Pierwszy argument.")
-    assert request["generationConfig"]["maxOutputTokens"] == 2048
+    assert request["generationConfig"]["maxOutputTokens"] == 4096
     assert request["generationConfig"]["thinkingConfig"] == {
         "thinkingLevel": "minimal",
         "includeThoughts": False,
@@ -37,7 +44,7 @@ def test_gemini_request_keeps_profiles_and_public_history_separate():
 
 
 async def test_stream_request_usage_reasoning_and_credentials():
-    payload = build_request(config(provider="gemini"), 0, [])
+    payload = build_request(config(), 0, [])
     response = None
 
     async def handle(request):
@@ -76,8 +83,8 @@ async def test_stream_request_usage_reasoning_and_credentials():
         )
         return response
 
-    provider = GeminiProvider("")
-    provider.client = httpx.AsyncClient(
+    provider = GeminiClient("")
+    provider.http = httpx.AsyncClient(
         base_url="https://generativelanguage.googleapis.com/v1beta/",
         headers={"x-goog-api-key": "test-secret"},
         transport=httpx.MockTransport(handle),
@@ -94,7 +101,7 @@ async def test_stream_request_usage_reasoning_and_credentials():
     assert "test-secret" not in json.dumps(chunks)
     assert response.is_closed
     await provider.close()
-    assert provider.client.is_closed
+    assert provider.http.is_closed
 
 
 @pytest.mark.parametrize(
@@ -127,12 +134,12 @@ async def test_http_errors_are_sanitized_and_retry_info_is_respected(status, cod
             },
         )
 
-    provider = GeminiProvider("")
-    provider.client = httpx.AsyncClient(
+    provider = GeminiClient("")
+    provider.http = httpx.AsyncClient(
         base_url="https://example.test/", transport=httpx.MockTransport(handle)
     )
-    with pytest.raises(ProviderError) as info:
-        async for _ in provider.stream(build_request(config(provider="gemini"), 0, [])):
+    with pytest.raises(GeminiError) as info:
+        async for _ in provider.stream(build_request(config(), 0, [])):
             pass
     assert info.value.code == code
     assert "test-secret" not in json.dumps(info.value.as_dict())
@@ -150,15 +157,15 @@ async def test_http_errors_are_sanitized_and_retry_info_is_respected(status, cod
     ],
 )
 async def test_stream_errors_are_not_successful_replies(event, code):
-    provider = GeminiProvider("")
-    provider.client = httpx.AsyncClient(
+    provider = GeminiClient("")
+    provider.http = httpx.AsyncClient(
         base_url="https://example.test/",
         transport=httpx.MockTransport(
             lambda request: httpx.Response(200, text=f"data: {json.dumps(event)}\n\n")
         ),
     )
-    with pytest.raises(ProviderError) as info:
-        async for _ in provider.stream(build_request(config(provider="gemini"), 0, [])):
+    with pytest.raises(GeminiError) as info:
+        async for _ in provider.stream(build_request(config(), 0, [])):
             pass
     assert info.value.code == code
     assert "test-secret" not in str(info.value)
@@ -170,23 +177,23 @@ async def test_output_limit_does_not_publish_partial_turn(tmp_path):
     from app.storage import Storage
     from tests.helpers import finish
 
-    provider = GeminiProvider("")
+    provider = GeminiClient("")
     provider.configured = True
     event = {
         "candidates": [
             {"content": {"parts": [{"text": "Nieukończona"}]}, "finishReason": "MAX_TOKENS"}
         ]
     }
-    provider.client = httpx.AsyncClient(
+    provider.http = httpx.AsyncClient(
         base_url="https://example.test/",
         transport=httpx.MockTransport(
             lambda request: httpx.Response(200, text=f"data: {json.dumps(event)}\n\n")
         ),
     )
     storage = Storage(str(tmp_path / "limit.sqlite3"))
-    engine = Engine(storage, {"gemini": provider})
+    engine = Engine(storage, provider)
     try:
-        debate = await engine.create(config(provider="gemini", rounds=1))
+        debate = await engine.create(config(rounds=1))
         await finish(engine)
         result = engine.get(debate["id"])
         assert result["status"] == "error"
@@ -217,16 +224,16 @@ async def test_stopping_gemini_closes_stream_and_keeps_partial_attempt(tmp_path)
             self.closed = True
 
     stream = BlockingStream()
-    provider = GeminiProvider("")
+    provider = GeminiClient("")
     provider.configured = True
-    provider.client = httpx.AsyncClient(
+    provider.http = httpx.AsyncClient(
         base_url="https://example.test/",
         transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=stream)),
     )
     storage = Storage(str(tmp_path / "stop.sqlite3"))
-    engine = Engine(storage, {"gemini": provider})
+    engine = Engine(storage, provider)
     try:
-        debate = await engine.create(config(provider="gemini", rounds=1))
+        debate = await engine.create(config(rounds=1))
         await asyncio.wait_for(stream.started.wait(), timeout=3)
         await engine.control(debate["id"], "stop")
         result = engine.get(debate["id"])

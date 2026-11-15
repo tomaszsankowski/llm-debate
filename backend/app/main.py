@@ -9,9 +9,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+
 from .auth import configure_login
 from .gemini_client import GeminiProvider
-from .groq_client import GroqProvider
 from .models import PROVIDERS, Annotation, Control, DebateConfig
 from .prompts import LEVELS, PROMPT_VERSION, TRAITS, system_prompt
 from .simulation import Conflict, Engine, now
@@ -19,7 +19,7 @@ from .storage import Storage
 
 
 def create_app(
-    database_path: str | None = None, provider=None, frontend_dist: str | None = None
+    database_path: str | None = None, client=None, frontend_dist: str | None = None
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -36,15 +36,7 @@ def create_app(
         else:
             raise ValueError("Unsupported STORAGE_BACKEND")
         storage.recover(now())
-        providers = (
-            provider
-            if provider is not None
-            else {
-                "groq": GroqProvider(os.getenv("GROQ_API_KEY", "")),
-                "gemini": GeminiProvider(os.getenv("GEMINI_API_KEY", "")),
-            }
-        )
-        engine = Engine(storage, providers)
+        engine = Engine(storage, client or GeminiClient(os.getenv("GEMINI_API_KEY", "")))
         app.state.engine = engine
         try:
             yield
@@ -84,18 +76,14 @@ def create_app(
     async def health():
         return {
             "status": "ok",
-            "api_key_configured": any(item.configured for item in engine().providers.values()),
-            "providers": {
-                key: bool(engine().providers.get(key) and engine().providers[key].configured)
-                for key in PROVIDERS
-            },
+            "api_key_configured": engine().client.configured,
             "active_debate_id": engine().active_id,
         }
 
     @app.get("/api/settings")
     async def settings():
         return {
-            "providers": [{"id": key, **value} for key, value in PROVIDERS.items()],
+            "model": MODEL_ID,
             "prompt_version": PROMPT_VERSION,
             "traits": TRAITS,
             "levels": LEVELS,
