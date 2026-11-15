@@ -9,10 +9,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-
 from .auth import configure_login
-from .gemini_client import GeminiProvider
-from .models import PROVIDERS, Annotation, Control, DebateConfig
+from .gemini_client import GeminiClient
+from .models import MODEL_ID, Annotation, Control, DebateConfig
 from .prompts import LEVELS, PROMPT_VERSION, TRAITS, system_prompt
 from .simulation import Conflict, Engine, now
 from .storage import Storage

@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from tests.helpers import FakeProvider, config
+from tests.helpers import FakeGemini, config
 
 
 @pytest.fixture
@@ -18,7 +18,7 @@ def test_all_routes_are_protected(tmp_path, credentials):
     (dist / "assets").mkdir(parents=True)
     (dist / "index.html").write_text("<h1>Private</h1>")
     (dist / "assets" / "app.js").write_text("// private")
-    app = create_app(str(tmp_path / "db"), FakeProvider(), str(dist))
+    app = create_app(str(tmp_path / "db"), FakeGemini(), str(dist))
     with TestClient(app) as client:
         for path in [
             "/", "/assets/app.js", "/docs", "/openapi.json", "/api/health",
@@ -35,14 +35,14 @@ def test_all_routes_are_protected(tmp_path, credentials):
 
 @pytest.mark.parametrize("header", ["Basic !!!", "Basic Og==", "Bearer token", "Basic"])
 def test_invalid_credentials(tmp_path, credentials, header):
-    with TestClient(create_app(str(tmp_path / "db"), FakeProvider())) as client:
+    with TestClient(create_app(str(tmp_path / "db"), FakeGemini())) as client:
         assert client.get("/", headers={"Authorization": header}).status_code == 401
         assert client.get("/", auth=(credentials[0], "wrong")).status_code == 401
         assert client.get("/", auth=("wrong", credentials[1])).status_code == 401
 
 
 def test_authenticated_writes_and_cross_origin_protection(tmp_path, credentials):
-    with TestClient(create_app(str(tmp_path / "db"), FakeProvider(block=True))) as client:
+    with TestClient(create_app(str(tmp_path / "db"), FakeGemini(block=True))) as client:
         client.auth = credentials
         payload = config().model_dump(mode="json")
         assert client.post(

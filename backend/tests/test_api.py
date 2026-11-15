@@ -1,8 +1,17 @@
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.models import MODEL_ID
 from app.prompts import TRAITS, build_request, system_prompt
 from tests.helpers import FakeGemini, config
+
+
+def test_default_gemini_startup_and_settings_without_api_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with TestClient(create_app(str(tmp_path / "startup.sqlite3"))) as client:
+        assert client.get("/healthz").json() == {"status": "ok"}
+        assert client.get("/api/health").json()["api_key_configured"] is False
+        assert client.get("/api/settings").json()["model"] == MODEL_ID
 
 
 def test_config_validation_preview_and_exports(tmp_path):
