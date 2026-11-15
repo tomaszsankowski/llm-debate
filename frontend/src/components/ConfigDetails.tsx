@@ -20,7 +20,7 @@ export function ConfigDetails({ debate, settings }: { debate: Debate; settings: 
       <summary>Konfiguracja debaty</summary>
       <Values
         values={[
-          ['Dostawca', debate.provider === 'gemini' ? 'Gemini' : 'Groq'],
+          ['Dostawca', debate.provider],
           ['Model', debate.model],
           ['Wersja instrukcji', debate.prompt_version],
           [

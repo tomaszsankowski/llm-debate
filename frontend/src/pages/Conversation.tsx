@@ -115,6 +115,7 @@ function ConversationContent({
   )
   const active = ['running', 'pausing', 'waiting'].includes(debate.status)
   const terminal = ['stopped', 'completed'].includes(debate.status)
+  const archived = debate.provider !== 'gemini'
   const nextIndex = (debate.first_agent + debate.messages.length) % 2
   useEffect(() => {
     if (follow && viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight
@@ -142,6 +143,12 @@ function ConversationContent({
         </div>
       </div>
       {error && <Notice error>{error}</Notice>}
+      {archived && (
+        <Notice>
+          To zapis z nieobsługiwanego już API. Możesz go odczytać, wyeksportować lub użyć ustawień w
+          nowej debacie Gemini.
+        </Notice>
+      )}
       {disconnected && (
         <Notice>
           Połączenie z podglądem zostało przerwane. Trwa ponowne łączenie; zapisane wypowiedzi
@@ -255,13 +262,16 @@ function ConversationContent({
                   <Pause size={15} /> Pauza
                 </Button>
               ) : (
-                <Button disabled={busy || terminal} onClick={() => void control('resume')}>
+                <Button
+                  disabled={busy || terminal || archived}
+                  onClick={() => void control('resume')}
+                >
                   <Play size={15} /> Wznów
                 </Button>
               )}
               <Button
                 variant="outline"
-                disabled={busy || active || terminal}
+                disabled={busy || active || terminal || archived}
                 onClick={() => void control('step')}
               >
                 <SkipForward size={16} /> Jedna wypowiedź

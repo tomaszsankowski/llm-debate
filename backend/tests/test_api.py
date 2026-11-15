@@ -2,12 +2,12 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.prompts import TRAITS, build_request, system_prompt
-from tests.helpers import FakeProvider, config
+from tests.helpers import FakeGemini, config
 
 
 def test_config_validation_preview_and_exports(tmp_path):
-    provider = FakeProvider(block=True)
-    app = create_app(str(tmp_path / "api.sqlite3"), provider=provider)
+    provider = FakeGemini(block=True)
+    app = create_app(str(tmp_path / "api.sqlite3"), client=provider)
     with TestClient(app) as client:
         assert client.get("/api/health").json()["api_key_configured"]
         data = config(rounds=1).model_dump(mode="json")
@@ -43,7 +43,7 @@ def test_config_validation_preview_and_exports(tmp_path):
         assert client.get("/api/debates?q=brak").json() == []
         assert "api_key" not in exported.text.lower()
         assert client.get(f"/api/debates/{debate_id}/attempts/missing").status_code == 404
-    with TestClient(create_app(str(tmp_path / "api.sqlite3"), provider=FakeProvider())) as client:
+    with TestClient(create_app(str(tmp_path / "api.sqlite3"), client=FakeGemini())) as client:
         assert client.get(f"/api/debates/{debate_id}").json()["config"] == data
         assert (
             client.get(f"/api/debates/{debate_id}").json()["annotations"]["outcome"] == "consensus"
@@ -52,7 +52,7 @@ def test_config_validation_preview_and_exports(tmp_path):
 
 def test_delete_debate_removes_snapshot_and_cached_state(tmp_path):
     database = str(tmp_path / "delete.sqlite3")
-    with TestClient(create_app(database, provider=FakeProvider(block=True))) as client:
+    with TestClient(create_app(database, client=FakeGemini(block=True))) as client:
         debate_id = client.post("/api/debates", json=config().model_dump(mode="json")).json()["id"]
         path = f"/api/debates/{debate_id}"
         assert client.delete(path).status_code == 409
@@ -65,14 +65,14 @@ def test_delete_debate_removes_snapshot_and_cached_state(tmp_path):
         assert client.post(f"{path}/control", json={"action": "resume"}).status_code == 404
         assert client.patch(f"{path}/annotations", json={"notes": "test"}).status_code == 404
         assert client.delete(path).status_code == 404
-    with TestClient(create_app(database, provider=FakeProvider())) as client:
+    with TestClient(create_app(database, client=FakeGemini())) as client:
         assert client.get("/api/debates").json() == []
         assert client.get(path).status_code == 404
 
 
 def test_deleting_archive_does_not_interrupt_another_debate(tmp_path):
     with TestClient(
-        create_app(str(tmp_path / "delete.sqlite3"), provider=FakeProvider(block=True))
+        create_app(str(tmp_path / "delete.sqlite3"), client=FakeGemini(block=True))
     ) as client:
         data = config().model_dump(mode="json")
         old_id = client.post("/api/debates", json=data).json()["id"]
@@ -84,7 +84,7 @@ def test_deleting_archive_does_not_interrupt_another_debate(tmp_path):
 
 
 def test_missing_key_and_static_frontend(tmp_path):
-    provider = FakeProvider()
+    provider = FakeGemini()
     provider.configured = False
     dist = tmp_path / "dist"
     dist.mkdir()
@@ -97,32 +97,6 @@ def test_missing_key_and_static_frontend(tmp_path):
         assert client.get("/api/unknown").status_code == 404
 
 
-def test_selected_provider_requires_its_own_key_and_matching_model(tmp_path):
-    groq, gemini = FakeProvider(), FakeProvider(block=True)
-    groq.configured = False
-    with TestClient(
-        create_app(str(tmp_path / "providers.sqlite3"), {"groq": groq, "gemini": gemini})
-    ) as client:
-        assert client.get("/api/health").json()["providers"] == {"groq": False, "gemini": True}
-        assert {item["id"] for item in client.get("/api/settings").json()["providers"]} == {
-            "groq",
-            "gemini",
-        }
-        denied = client.post("/api/debates", json=config().model_dump(mode="json"))
-        assert denied.status_code == 409
-        assert "GROQ_API_KEY" in denied.json()["detail"]
-        data = config(provider="gemini").model_dump(mode="json")
-        assert client.post("/api/debates", json={**data, "provider": "groq"}).status_code == 422
-        created = client.post("/api/debates", json=data)
-        assert created.status_code == 201
-        debate_id = created.json()["id"]
-        client.post(f"/api/debates/{debate_id}/control", json={"action": "stop"})
-        result = client.get(f"/api/debates/{debate_id}/export").json()
-        assert result["provider"] == "gemini"
-        assert result["model"] == data["model"]
-        assert groq.requests == []
-
-
 def test_traits_and_reasoning_are_independent():
     data = config()
     for key, definition in TRAITS.items():
@@ -133,10 +107,37 @@ def test_traits_and_reasoning_are_independent():
     off = build_request(data, 0, [])
     data.agents[0].reasoning = True
     on = build_request(data, 0, [])
-    assert off["reasoning_effort"] == "none"
-    assert on["reasoning_effort"] == "low"
-    assert on["reasoning_format"] == "parsed"
-    assert not {"temperature", "top_p", "seed"} & on.keys()
+    assert off["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": "minimal",
+        "includeThoughts": False,
+    }
+    assert on["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": "low",
+        "includeThoughts": True,
+    }
+    assert not {"temperature", "topP", "seed"} & on["generationConfig"].keys()
+
+
+def test_archived_debate_can_be_read_exported_and_copied_without_modifying_it(tmp_path):
+    app = create_app(str(tmp_path / "archive.sqlite3"), client=FakeGemini(block=True))
+    with TestClient(app) as client:
+        debate_id = client.post("/api/debates", json=config().model_dump(mode="json")).json()["id"]
+        path = f"/api/debates/{debate_id}"
+        client.post(f"{path}/control", json={"action": "stop"})
+        archived = app.state.engine.get(debate_id)
+        archived.update(provider="groq", model="old-model", status="error")
+        archived["config"].update(provider="groq", model="old-model")
+        app.state.engine.save(archived)
+        original = client.get(f"{path}/export").json()
+        assert client.get(path).json()["model"] == "old-model"
+        for action in ["resume", "step"]:
+            assert client.post(f"{path}/control", json={"action": action}).status_code == 409
+        assert client.get(f"{path}/export").json() == original
+        copied = client.post("/api/debates", json=original["config"])
+        assert copied.status_code == 201
+        assert copied.json()["provider"] == "gemini"
+        assert copied.json()["id"] != debate_id
+        assert client.get(f"{path}/export").json() == original
 
 
 def test_legacy_word_target_does_not_change_prompts_or_exported_config(tmp_path):
@@ -148,12 +149,10 @@ def test_legacy_word_target_does_not_change_prompts_or_exported_config(tmp_path)
     assert restored.model_dump(mode="json") == data
     assert legacy["target_words"] == 100  # archived snapshots are not modified
     request = build_request(restored, 0, [])
-    assert request["max_completion_tokens"] == 1024
-    assert "słów" not in request["messages"][0]["content"]
-    assert "1024" not in request["messages"][0]["content"]
-    with TestClient(
-        create_app(str(tmp_path / "legacy.sqlite3"), provider=FakeProvider())
-    ) as client:
+    assert request["generationConfig"]["maxOutputTokens"] == 4096
+    assert "słów" not in request["systemInstruction"]["parts"][0]["text"]
+    assert "4096" not in request["systemInstruction"]["parts"][0]["text"]
+    with TestClient(create_app(str(tmp_path / "legacy.sqlite3"), client=FakeGemini())) as client:
         current = client.post("/api/prompts/preview", json=data)
         previous = client.post("/api/prompts/preview", json=legacy)
         assert previous.status_code == 200

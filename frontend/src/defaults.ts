@@ -1,5 +1,8 @@
 import type { Agent, Config } from './types'
 
+export const MAX_OUTPUT_TOKENS = 65536
+export const DEFAULT_OUTPUT_TOKENS = 4096
+
 function agent(name: string): Agent {
   return {
     name,
@@ -8,13 +11,12 @@ function agent(name: string): Agent {
     goal: 'Przekonać rozmówcę do swojego stanowiska.',
     instructions: '',
     traits: { escalation: 3, openness: 3, reactivity: 3, risk: 3, aggression: 3, dominance: 3 },
-    max_tokens: 1024,
+    max_tokens: DEFAULT_OUTPUT_TOKENS,
     reasoning: false,
   }
 }
 export function emptyConfig(): Config {
   return {
-    provider: 'groq',
     name: 'Nowa debata',
     topic: '',
     question: '',

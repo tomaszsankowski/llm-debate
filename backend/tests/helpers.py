@@ -28,7 +28,7 @@ def config(**updates):
     )
 
 
-class FakeProvider:
+class FakeGemini:
     configured = True
 
     def __init__(self, responses=None, block=False):

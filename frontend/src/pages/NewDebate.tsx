@@ -3,15 +3,38 @@ import { ArrowRight, BookOpen, Eye, LoaderCircle, RotateCcw, Sparkles } from 'lu
 import { AgentCard } from '../components/AgentCard'
 import { Button, Field, Input, Notice, Select, Textarea } from '../components/ui'
 import { api, navigate } from '../api/client'
-import { emptyConfig, example } from '../defaults'
+import { emptyConfig, example, DEFAULT_OUTPUT_TOKENS } from '../defaults'
 import type { Config, Debate, Health, Settings } from '../types'
 
-const DRAFT_KEY = 'llm-debate.draft.v1'
+const DRAFT_KEY = 'llm-debate.draft.v3'
+function restoreConfig(saved: Config): Config {
+  const clean = { ...saved } as Config & {
+    provider?: string
+    model?: string
+    target_words?: number
+  }
+  delete clean.provider
+  delete clean.model
+  delete clean.target_words
+  return { ...emptyConfig(), ...clean }
+}
 function loadDraft(): Config {
   try {
-    const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null')
-    if (saved?.agents?.length === 2 && saved?.agents[0]?.traits)
-      return { ...emptyConfig(), ...saved }
+    const current = localStorage.getItem(DRAFT_KEY)
+    const previous = localStorage.getItem('llm-debate.draft.v2')
+    const saved = JSON.parse(
+      current || previous || localStorage.getItem('llm-debate.draft.v1') || 'null',
+    )
+    if (saved?.agents?.length === 2 && saved?.agents[0]?.traits) {
+      const restored = restoreConfig(saved)
+      if (!current) {
+        const oldDefaults = previous ? [65536] : [1024, 2048, 65536]
+        for (const agent of restored.agents) {
+          if (oldDefaults.includes(agent.max_tokens)) agent.max_tokens = DEFAULT_OUTPUT_TOKENS
+        }
+      }
+      return restored
+    }
   } catch {
     /* Storage may be unavailable. */
   }
@@ -30,14 +53,12 @@ export function NewDebate({
   onStarted: () => void
 }) {
   const [config, setConfig] = useState<Config>(() =>
-    initial ? { ...emptyConfig(), ...initial } : loadDraft(),
+    initial ? restoreConfig(initial) : loadDraft(),
   )
   const [error, setError] = useState('')
   const [busy, setBusy] = useState<'start' | 'preview' | null>(null)
   const [preview, setPreview] = useState<{ agents: string[]; opening: string } | null>(null)
   const [showPreview, setShowPreview] = useState(false)
-  const provider = settings.providers.find((item) => item.id === config.provider)!
-  const configured = health.providers[config.provider]
   useEffect(() => {
     try {
       localStorage.setItem(DRAFT_KEY, JSON.stringify(config))
@@ -49,29 +70,6 @@ export function NewDebate({
   function change<K extends keyof Config>(key: K, value: Config[K]) {
     setConfig((old) => ({ ...old, [key]: value }))
   }
-  function selectProvider(id: Config['provider']) {
-    const next = settings.providers.find((item) => item.id === id)!
-    setConfig((old) => ({
-      ...old,
-      provider: id,
-      model: '',
-      agents: old.agents.map((agent) => ({
-        ...agent,
-        max_tokens:
-          agent.max_tokens === provider.default_max_tokens
-            ? next.default_max_tokens
-            : agent.max_tokens,
-      })) as Config['agents'],
-    }))
-  }
-  function loadExample(kind: 'migration' | 'pen') {
-    const preset = example(kind)
-    preset.provider = config.provider
-    preset.model = config.model
-    for (const agent of preset.agents) agent.max_tokens = provider.default_max_tokens
-    setConfig(preset)
-  }
-
   async function submit(form: HTMLFormElement, action: 'start' | 'preview') {
     if (!form.reportValidity()) return
     setBusy(action)
@@ -109,11 +107,11 @@ export function NewDebate({
           <span /> 2 agentów · język polski
         </span>
       </div>
-      {!configured && (
+      {!health.api_key_configured && (
         <Notice>
-          Dodaj klucz <code>{provider.key_env}</code> do pliku <code>.env</code> i odtwórz kontener
+          Dodaj klucz <code>GEMINI_API_KEY</code> do pliku <code>.env</code> i odtwórz kontener
           przez <code>docker compose up -d --force-recreate</code>, aby prowadzić debaty przez{' '}
-          {provider.label}. Możesz już przygotować konfigurację i obejrzeć instrukcje.
+          Gemini. Możesz już przygotować konfigurację i obejrzeć instrukcje.
         </Notice>
       )}
       {health.active_debate_id && (
@@ -127,10 +125,10 @@ export function NewDebate({
         <span>
           <Sparkles size={16} /> Zacznij od przykładu
         </span>
-        <Button variant="ghost" size="small" onClick={() => loadExample('migration')}>
+        <Button variant="ghost" size="small" onClick={() => setConfig(example('migration'))}>
           Polityka migracyjna <ArrowRight size={14} />
         </Button>
-        <Button variant="ghost" size="small" onClick={() => loadExample('pen')}>
+        <Button variant="ghost" size="small" onClick={() => setConfig(example('pen'))}>
           Spór o długopis <ArrowRight size={14} />
         </Button>
         <Button
@@ -161,23 +159,6 @@ export function NewDebate({
             </div>
           </div>
           <div className="form-grid">
-            <Field
-              label="Dostawca i model"
-              hint="Obaj agenci korzystają z tego modelu przez całą debatę."
-              className="full-width"
-            >
-              <Select
-                value={config.provider}
-                onChange={(event) => selectProvider(event.target.value as Config['provider'])}
-              >
-                {settings.providers.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label} · {option.model}
-                    {health.providers[option.id] ? '' : ' · brak klucza'}
-                  </option>
-                ))}
-              </Select>
-            </Field>
             <Field label="Nazwa debaty">
               <Input
                 required
@@ -283,7 +264,6 @@ export function NewDebate({
               agent={agent}
               index={index}
               settings={settings}
-              provider={config.provider}
               onChange={(value) =>
                 setConfig((old) => {
                   const agents: Config['agents'] = [...old.agents]
@@ -318,9 +298,7 @@ export function NewDebate({
         <div className="start-bar">
           <div>
             <strong>{config.rounds * 2} wypowiedzi</strong>
-            <span>
-              {provider.label} · {provider.model.split('/').at(-1)} · automatyczny zapis
-            </span>
+            <span>Gemini · {settings.model} · automatyczny zapis</span>
           </div>
           <div className="button-row">
             <Button
@@ -333,7 +311,7 @@ export function NewDebate({
             </Button>
             <Button
               type="submit"
-              disabled={busy !== null || !configured || !!health.active_debate_id}
+              disabled={busy !== null || !health.api_key_configured || !!health.active_debate_id}
             >
               {busy === 'start' ? (
                 <LoaderCircle className="spin" size={16} />

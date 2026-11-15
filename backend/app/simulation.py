@@ -8,9 +8,9 @@ from contextlib import aclosing, suppress
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from .models import PROVIDERS, Annotation, DebateConfig
+from .gemini_client import GeminiError
+from .models import MODEL_ID, Annotation, DebateConfig
 from .prompts import PROMPT_VERSION, build_request
-from .provider import ProviderError
 from .storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -32,9 +32,9 @@ class Conflict(Exception):
 
 
 class Engine:
-    def __init__(self, storage: Storage, provider):
+    def __init__(self, storage: Storage, client):
         self.storage = storage
-        self.providers = provider if isinstance(provider, dict) else {"groq": provider}
+        self.client = client
         self.lock = asyncio.Lock()
         self.task: asyncio.Task | None = None
         self.current: dict | None = None
@@ -84,17 +84,16 @@ class Engine:
         if self.active_id:
             raise Conflict("Inna generacja już trwa. Wstrzymaj lub zatrzymaj aktywną debatę.")
 
-    def require_provider(self, provider_id: str):
-        provider = self.providers.get(provider_id)
-        if not provider or not provider.configured:
-            key = PROVIDERS[provider_id]["key_env"]
-            raise Conflict(f"Brak klucza {key}. Uzupełnij .env i odtwórz kontener aplikacji.")
-        return provider
+    def check_key(self) -> None:
+        if not self.client.configured:
+            raise Conflict(
+                "Brak klucza GEMINI_API_KEY. Uzupełnij .env i odtwórz kontener aplikacji."
+            )
 
     async def create(self, config: DebateConfig) -> dict:
         async with self.lock:
             self.check_idle()
-            self.require_provider(config.provider)
+            self.check_key()
             timestamp = now()
             first = (
                 secrets.randbelow(2)
@@ -108,8 +107,8 @@ class Engine:
                 "created_at": timestamp,
                 "updated_at": timestamp,
                 "revision": 0,
-                "provider": config.provider,
-                "model": config.model,
+                "provider": "gemini",
+                "model": MODEL_ID,
                 "config": config.model_dump(mode="json"),
                 "first_agent": first,
                 "status": "paused",
@@ -141,7 +140,11 @@ class Engine:
                     raise Conflict(
                         "Ta debata jest zakończona. Można użyć jej ustawień w nowej debacie."
                     )
-                self.require_provider(debate["provider"])
+                if debate["provider"] != "gemini":
+                    raise Conflict(
+                        "Ta debata pochodzi z nieobsługiwanego już API. Można ją odczytać, wyeksportować lub użyć jej ustawień w nowej debacie Gemini."
+                    )
+                self.check_key()
                 self.launch(debate, step=action == "step")
             elif action == "pause":
                 if self.active_id != debate_id:
@@ -197,15 +200,14 @@ class Engine:
             "metadata": {},
             "finish_reason": None,
             "error": None,
-            "request": build_request(config, index, debate["messages"]),
+            "request": build_request(config, index, debate["messages"], model=debate["model"]),
         }
         debate["attempts"].append(attempt)
         self.save(debate)
         started = time.monotonic()
         last_save = started
         try:
-            provider = self.require_provider(debate["provider"])
-            async with aclosing(provider.stream(copy.deepcopy(attempt["request"]))) as stream:
+            async with aclosing(self.client.stream(copy.deepcopy(attempt["request"]))) as stream:
                 async for chunk in stream:
                     attempt["content"] += chunk.get("content", "")
                     attempt["reasoning"] += chunk.get("reasoning", "")
@@ -226,9 +228,9 @@ class Engine:
                     if attempt["finish_reason"] == "length"
                     else ("Strumień zakończył się bez pełnej odpowiedzi. Można wznowić debatę.")
                 )
-                raise ProviderError("incomplete", message)
+                raise GeminiError("incomplete", message)
             if not attempt["content"].strip():
-                raise ProviderError(
+                raise GeminiError(
                     "empty_response",
                     "Model nie zwrócił publicznej wypowiedzi. Próba została zapisana; można wznowić debatę.",
                 )
@@ -239,7 +241,7 @@ class Engine:
                 error={"code": "interrupted", "message": "Przerwano odbieranie odpowiedzi."},
             )
             raise
-        except ProviderError as error:
+        except GeminiError as error:
             attempt.update(status="failed", error=error.as_dict())
             raise
         except Exception:
@@ -257,16 +259,14 @@ class Engine:
         return attempt
 
     async def run(self, debate: dict) -> None:
-        config = DebateConfig.model_validate(
-            {**debate["config"], "provider": debate["provider"], "model": debate["model"]}
-        )
+        config = DebateConfig.model_validate(debate["config"])
         retries = 0
         try:
             while len(debate["messages"]) < config.rounds * 2:
                 index = (debate["first_agent"] + len(debate["messages"])) % 2
                 try:
                     attempt = await self.generate(debate, config, index)
-                except ProviderError as error:
+                except GeminiError as error:
                     if error.code == "rate_limit":
                         retries += 1
                         delay = rate_limit_delay(retries, error.retry_after)
@@ -344,5 +344,4 @@ class Engine:
                     status="interrupted", reason="Zatrzymano backend.", retry_at=None
                 )
                 self.save(self.current)
-        for provider in self.providers.values():
-            await provider.close()
+        await self.client.close()

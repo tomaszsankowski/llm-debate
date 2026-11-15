@@ -12,17 +12,7 @@ export type Agent = {
   max_tokens: number
   reasoning: boolean
 }
-export type ProviderId = 'groq' | 'gemini'
-export type ProviderOption = {
-  id: ProviderId
-  label: string
-  model: string
-  key_env: string
-  default_max_tokens: number
-}
 export type Config = {
-  provider: ProviderId
-  model?: string
   name: string
   topic: string
   question: string
@@ -34,14 +24,13 @@ export type Config = {
   agents: [Agent, Agent]
 }
 export type Settings = {
-  providers: ProviderOption[]
+  model: string
   prompt_version: string
   levels: string[]
   traits: Record<keyof Traits, { label: string; low: string; high: string; instructions: string[] }>
 }
 export type Health = {
   api_key_configured: boolean
-  providers: Record<ProviderId, boolean>
   active_debate_id: string | null
 }
 export type Status =

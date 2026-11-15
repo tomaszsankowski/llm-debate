@@ -46,7 +46,7 @@ test('konfiguracja, SSE, pauza, krok, zapis, eksport i ponowne użycie ustawień
   const data = await exported.json()
   expect(data.messages).toHaveLength(4)
   expect(data.attempts).toHaveLength(4)
-  expect(data.attempts[0].request.reasoning_effort).toBe('low')
+  expect(data.attempts[0].request.generationConfig.thinkingConfig.thinkingLevel).toBe('low')
   expect(data.annotations.outcome).toBe('partial')
   expect(data.annotations.notes).toContain('Zmiana stanowiska')
   expect(JSON.stringify(data.attempts[1].request)).not.toContain('Testowy materiał')
@@ -89,18 +89,28 @@ test('konfiguracja, SSE, pauza, krok, zapis, eksport i ponowne użycie ustawień
   expect(errors).toEqual([])
 })
 
-test('Gemini: wybór dostawcy, zapis modelu i ponowne użycie ustawień', async ({ page }) => {
+test('Gemini: zapis modelu, archiwum i ponowne użycie ustawień', async ({ page }) => {
   await page.goto('/')
-  await page.getByLabel('Dostawca i model', { exact: true }).selectOption('gemini')
+  await page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('llm-debate.draft.v3')!)
+    saved.agents[0].max_tokens = 65536
+    saved.agents[1].max_tokens = 1024
+    localStorage.setItem('llm-debate.draft.v2', JSON.stringify(saved))
+    localStorage.removeItem('llm-debate.draft.v3')
+  })
+  await page.reload()
+  const limits = page.getByLabel('Limit generacji (tokeny)', { exact: true })
+  await expect(limits.first()).toHaveValue('4096')
+  await expect(limits.last()).toHaveValue('1024')
   await page.getByRole('button', { name: 'Spór o długopis' }).click()
-  await expect(page.getByLabel('Dostawca i model', { exact: true })).toHaveValue('gemini')
+  await expect(page.getByLabel('Dostawca i model', { exact: true })).toHaveCount(0)
   await page.locator('summary').filter({ hasText: 'Przebieg rozmowy' }).click()
   await page.getByLabel('Limit rund', { exact: true }).fill('1')
   const agentA = page.locator('.agent-card').first()
   await agentA.locator('summary').click()
   await agentA.getByRole('checkbox', { name: 'Włącz reasoning' }).check()
   await expect(agentA.getByText('Zapisuje podsumowania', { exact: false })).toBeVisible()
-  await expect(agentA.getByLabel('Limit generacji (tokeny)', { exact: true })).toHaveValue('2048')
+  await expect(agentA.getByLabel('Limit generacji (tokeny)', { exact: true })).toHaveValue('4096')
   await page.getByRole('button', { name: 'Rozpocznij debatę' }).click()
   await expect(page.locator('.status-badge')).toHaveText('Zakończona', { timeout: 20000 })
   const id = page.url().split('/').at(-1)
@@ -108,15 +118,30 @@ test('Gemini: wybór dostawcy, zapis modelu i ponowne użycie ustawień', async 
   expect(data.provider).toBe('gemini')
   expect(data.model).toBe('gemini-3.5-flash-lite')
   expect(data.messages).toHaveLength(2)
+  expect(data.attempts[0].request.generationConfig.maxOutputTokens).toBe(4096)
   expect(data.attempts[0].request.generationConfig.thinkingConfig.includeThoughts).toBe(true)
   expect(data.attempts[1].request.generationConfig.thinkingConfig.includeThoughts).toBe(false)
   expect(data.attempts[0].request.systemInstruction.parts[0].text).toContain('Nazwa: Anna')
+  const archive = {
+    ...data,
+    provider: 'groq',
+    model: 'old-model',
+    status: 'paused',
+    config: { ...data.config, provider: 'groq', model: 'old-model', target_words: 100 },
+  }
+  await page.route(`**/api/debates/${id}`, (route) => route.fulfill({ json: archive }))
+  await page.route(`**/api/debates/${id}/events`, (route) =>
+    route.fulfill({
+      contentType: 'text/event-stream',
+      body: `event: snapshot\ndata: ${JSON.stringify(archive)}\n\n`,
+    }),
+  )
+  await page.reload()
+  await expect(page.getByText('To zapis z nieobsługiwanego', { exact: false })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Wznów', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Jedna wypowiedź' })).toBeDisabled()
   await page.getByRole('button', { name: 'Użyj tych ustawień' }).click()
-  await expect(page.getByLabel('Dostawca i model', { exact: true })).toHaveValue('gemini')
-  await page.getByLabel('Dostawca i model', { exact: true }).selectOption('groq')
-  await expect(
-    page.locator('.agent-card').first().getByLabel('Limit generacji (tokeny)', { exact: true }),
-  ).toHaveValue('1024')
+  await expect(page.getByLabel('Dostawca i model', { exact: true })).toHaveCount(0)
   await page.getByRole('button', { name: 'Rozpocznij debatę' }).click()
   await expect(page).toHaveURL(/#\/debate\//)
   await page.getByRole('button', { name: 'Zatrzymaj', exact: true }).click()
@@ -128,7 +153,6 @@ test('brak klucza oraz formularz na małym ekranie', async ({ page }, testInfo) 
     route.fulfill({
       json: {
         api_key_configured: false,
-        providers: { groq: false, gemini: false },
         active_debate_id: null,
       },
     }),
@@ -137,7 +161,6 @@ test('brak klucza oraz formularz na małym ekranie', async ({ page }, testInfo) 
   await page.goto('/')
   await expect(page.getByRole('button', { name: 'Rozpocznij debatę' })).toBeDisabled()
   await expect(page.getByText('Dodaj klucz', { exact: false })).toBeVisible()
-  await page.getByLabel('Dostawca i model', { exact: true }).selectOption('gemini')
   await expect(page.getByText('GEMINI_API_KEY', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Rozpocznij debatę' })).toBeDisabled()
   await page.getByRole('button', { name: 'Polityka migracyjna' }).click()

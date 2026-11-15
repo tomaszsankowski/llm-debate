@@ -4,11 +4,11 @@ import json
 import pytest
 
 from app import simulation
+from app.gemini_client import GeminiError
 from app.models import Annotation
-from app.provider import ProviderError
 from app.simulation import Conflict, Engine, now
 from app.storage import Storage
-from tests.helpers import FakeProvider, config, finish
+from tests.helpers import FakeGemini, config, finish
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def storage(tmp_path):
 
 @pytest.mark.parametrize("first", ["A", "B", "random"])
 async def test_turns_private_profiles_and_exact_requests(storage, first):
-    provider = FakeProvider()
+    provider = FakeGemini()
     engine = Engine(storage, provider)
     debate = await engine.create(config(rounds=3, first_speaker=first))
     await finish(engine)
@@ -40,17 +40,22 @@ async def test_turns_private_profiles_and_exact_requests(storage, first):
         assert f"PRYWATNE_{'AB'[index]}" in serialized
         assert f"PRYWATNE_{'BA'[index]}" not in serialized
         assert "TAJNY_TEKST_ROZUMOWANIA" not in serialized
-        assert len(request["messages"]) == n + 2
         assert request == result["attempts"][n]["request"]
-        for message, original in zip(
-            request["messages"][1:-1], result["messages"][:n], strict=True
-        ):
-            assert message["role"] == ("assistant" if original["agent_index"] == index else "user")
+        native_messages = [
+            (item["role"], part["text"])
+            for item in request["contents"]
+            for part in item["parts"]
+            if part["text"].startswith("[")
+        ]
+        assert len(native_messages) == n
+        for (role, content), original in zip(native_messages, result["messages"][:n], strict=True):
+            assert role == ("model" if original["agent_index"] == index else "user")
+            assert content.endswith(original["content"])
     assert "request" not in engine.view(debate["id"])["attempts"][0]
 
 
 async def test_pause_finishes_current_turn_then_step_and_resume(storage):
-    provider = FakeProvider(block=True)
+    provider = FakeGemini(block=True)
     engine = Engine(storage, provider)
     debate = await engine.create(config(rounds=2))
     await provider.started.wait()
@@ -74,7 +79,7 @@ async def test_pause_finishes_current_turn_then_step_and_resume(storage):
 
 
 async def test_stop_records_partial_without_public_turn(storage):
-    provider = FakeProvider(block=True)
+    provider = FakeGemini(block=True)
     engine = Engine(storage, provider)
     debate = await engine.create(config(rounds=2))
     await provider.started.wait()
@@ -87,54 +92,54 @@ async def test_stop_records_partial_without_public_turn(storage):
     assert engine.active_id is None
 
 
-async def test_provider_is_preserved_on_resume_and_all_clients_are_closed(storage):
-    groq = FakeProvider()
-    gemini = FakeProvider(block=True)
-    engine = Engine(storage, {"groq": groq, "gemini": gemini})
-    debate = await engine.create(config(provider="gemini", rounds=2))
-    await gemini.started.wait()
+async def test_saved_model_is_preserved_on_resume_and_client_is_closed(storage):
+    client = FakeGemini(block=True)
+    engine = Engine(storage, client)
+    debate = await engine.create(config(rounds=2))
+    await client.started.wait()
     await engine.control(debate["id"], "pause")
-    gemini.release.set()
+    client.release.set()
     await finish(engine)
-    assert len(engine.get(debate["id"])["messages"]) == 1
+    saved_model = "gemini-saved-model"
+    engine.get(debate["id"])["model"] = saved_model
     await engine.control(debate["id"], "resume")
     await finish(engine)
-    result = storage.get(debate["id"])
-    assert result["provider"] == result["config"]["provider"] == "gemini"
-    assert result["model"] == result["config"]["model"] == "gemini-3.5-flash-lite"
-    assert len(gemini.requests) == 4
-    assert groq.requests == []
-    for attempt in result["attempts"]:
-        assert attempt["request"]["model"] == result["model"]
-        assert "TAJNY_TEKST_ROZUMOWANIA" not in json.dumps(attempt["request"])
+    assert len(client.requests) == 4
+    assert all(request["model"] == saved_model for request in client.requests[1:])
+    assert engine.get(debate["id"])["provider"] == "gemini"
     await engine.close()
-    assert groq.closed and gemini.closed
+    assert client.closed
 
 
-async def test_legacy_debate_resumes_on_groq(storage):
-    first = Engine(storage, FakeProvider([ProviderError("connection", "Przerwane połączenie")]))
-    debate = await first.create(config(rounds=1))
-    await finish(first)
-    await first.close()
-    archived = storage.get(debate["id"])
-    archived["config"].pop("provider")
-    archived["config"].pop("model")
-    for agent in archived["config"]["agents"]:
-        agent["max_tokens"] = 2048
-    storage.save(archived)
-    groq, gemini = FakeProvider(), FakeProvider()
-    engine = Engine(storage, {"groq": groq, "gemini": gemini})
-    await engine.control(debate["id"], "resume")
+async def test_legacy_archive_cannot_be_resumed_through_gemini(storage):
+    from app.models import DebateConfig
+
+    client = FakeGemini([GeminiError("connection", "Disconnected")])
+    engine = Engine(storage, client)
+    debate = await engine.create(config(rounds=1))
     await finish(engine)
-    assert engine.get(debate["id"])["status"] == "completed"
-    assert len(groq.requests) == 2
-    assert all(request["max_completion_tokens"] == 2048 for request in groq.requests)
-    assert gemini.requests == []
+    archived = engine.get(debate["id"])
+    archived["provider"] = "groq"
+    archived["model"] = "old-model"
+    archived["config"].update(provider="groq", model="old-model")
+    engine.save(archived)
+    original = json.dumps(storage.get(debate["id"]), sort_keys=True)
+    for action in ["resume", "step"]:
+        with pytest.raises(Conflict):
+            await engine.control(debate["id"], action)
+    assert len(client.requests) == 1
+    assert json.dumps(storage.get(debate["id"]), sort_keys=True) == original
+    # The same scenario can start a separate Gemini experiment.
+    copied = DebateConfig.model_validate(archived["config"])
+    fresh = await engine.create(copied)
+    await finish(engine)
+    assert fresh["id"] != debate["id"]
+    assert fresh["provider"] == "gemini"
     await engine.close()
 
 
 async def test_stop_before_worker_starts_and_double_start(storage):
-    engine = Engine(storage, FakeProvider(block=True))
+    engine = Engine(storage, FakeGemini(block=True))
     debate = await engine.create(config(rounds=1))
     with pytest.raises(Conflict):
         await engine.create(config(rounds=1))
@@ -167,9 +172,9 @@ async def test_rate_limit_keeps_retrying_and_resets_after_success(storage, monke
         return 0  # Exercise the actual retry loop without waiting several minutes.
 
     monkeypatch.setattr(simulation, "rate_limit_delay", record_delay)
-    provider = FakeProvider(
-        [ProviderError("rate_limit", "Limit") for _ in range(5)]
-        + [{}, ProviderError("rate_limit", "Limit")]
+    provider = FakeGemini(
+        [GeminiError("rate_limit", "Limit") for _ in range(5)]
+        + [{}, GeminiError("rate_limit", "Limit")]
     )
     engine = Engine(storage, provider)
     debate = await engine.create(config(rounds=1))
@@ -186,7 +191,7 @@ async def test_rate_limit_keeps_retrying_and_resets_after_success(storage, monke
 
 @pytest.mark.parametrize("action, status", [("pause", "paused"), ("stop", "stopped")])
 async def test_wait_can_be_paused_and_stopped_without_waiting(storage, action, status):
-    engine = Engine(storage, FakeProvider([ProviderError("rate_limit", "Limit", 3600)]))
+    engine = Engine(storage, FakeGemini([GeminiError("rate_limit", "Limit", 3600)]))
     debate = await engine.create(config(rounds=1))
     for _ in range(100):
         if engine.get(debate["id"])["status"] == "waiting":
@@ -204,7 +209,7 @@ async def test_wait_can_be_paused_and_stopped_without_waiting(storage, action, s
 
 
 async def test_oversized_request_stops_without_retrying(storage):
-    provider = FakeProvider([ProviderError("request_too_large", "Żądanie jest zbyt duże.")])
+    provider = FakeGemini([GeminiError("request_too_large", "Żądanie jest zbyt duże.")])
     engine = Engine(storage, provider)
     debate = await engine.create(config(rounds=1))
     await finish(engine)
@@ -225,7 +230,7 @@ async def test_oversized_request_stops_without_retrying(storage):
     ],
 )
 async def test_incomplete_attempt_is_excluded_on_resume(storage, response):
-    provider = FakeProvider([response])
+    provider = FakeGemini([response])
     engine = Engine(storage, provider)
     debate = await engine.create(config(rounds=1))
     await finish(engine)
@@ -234,13 +239,13 @@ async def test_incomplete_attempt_is_excluded_on_resume(storage, response):
     await engine.control(debate["id"], "resume")
     await finish(engine)
     assert len(engine.get(debate["id"])["messages"]) == 2
-    assert len(provider.requests[1]["messages"]) == 2
+    assert len(provider.requests[1]["contents"]) == 1
 
 
 async def test_annotations_and_restart_preserve_transcript(tmp_path):
     path = str(tmp_path / "restart.sqlite3")
     storage = Storage(path)
-    provider = FakeProvider(block=True)
+    provider = FakeGemini(block=True)
     engine = Engine(storage, provider)
     debate = await engine.create(config(rounds=1))
     await provider.started.wait()
@@ -253,7 +258,7 @@ async def test_annotations_and_restart_preserve_transcript(tmp_path):
     assert result["status"] == "interrupted"
     assert result["annotations"]["notes"] == "Tylko dla badacza"
     assert result["attempts"][0]["content"]
-    new_provider = FakeProvider()
+    new_provider = FakeGemini()
     second = Engine(reopened, new_provider)
     await second.control(debate["id"], "resume")
     await finish(second)
@@ -264,9 +269,9 @@ async def test_annotations_and_restart_preserve_transcript(tmp_path):
 
 
 async def test_recover_after_unclean_exit(storage):
-    engine = Engine(storage, FakeProvider(block=True))
+    engine = Engine(storage, FakeGemini(block=True))
     debate = await engine.create(config(rounds=1))
-    await engine.providers["groq"].started.wait()
+    await engine.client.started.wait()
     engine.save(engine.get(debate["id"]))
     saved = storage.get(debate["id"])
     await engine.close()
@@ -279,7 +284,7 @@ async def test_recover_after_unclean_exit(storage):
 
 
 async def test_concurrent_starts_and_event_subscriptions(storage):
-    engine = Engine(storage, FakeProvider(block=True))
+    engine = Engine(storage, FakeGemini(block=True))
     results = await asyncio.gather(
         engine.create(config()), engine.create(config()), return_exceptions=True
     )
@@ -295,14 +300,14 @@ async def test_concurrent_starts_and_event_subscriptions(storage):
 
 async def test_single_step_retries_rate_limit_then_pauses(storage, monkeypatch):
     monkeypatch.setattr(simulation, "rate_limit_delay", lambda retry, retry_after: 0)
-    provider = FakeProvider(block=True)
+    provider = FakeGemini(block=True)
     engine = Engine(storage, provider)
     debate = await engine.create(config(rounds=2))
     await provider.started.wait()
     await engine.control(debate["id"], "pause")
     provider.release.set()
     await finish(engine)
-    provider.responses = [ProviderError("rate_limit", "Limit", 0)]
+    provider.responses = [GeminiError("rate_limit", "Limit", 0)]
     await engine.control(debate["id"], "step")
     await finish(engine)
     result = storage.get(debate["id"])

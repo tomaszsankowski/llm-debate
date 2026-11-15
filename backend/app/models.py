@@ -2,22 +2,9 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-MODEL_ID = "qwen/qwen3.8-27b"
-GEMINI_MODEL_ID = "gemini-3.5-flash-lite"
-PROVIDERS = {
-    "groq": {
-        "label": "Groq",
-        "model": MODEL_ID,
-        "key_env": "GROQ_API_KEY",
-        "default_max_tokens": 1024,
-    },
-    "gemini": {
-        "label": "Gemini",
-        "model": GEMINI_MODEL_ID,
-        "key_env": "GEMINI_API_KEY",
-        "default_max_tokens": 2048,
-    },
-}
+MODEL_ID = "gemini-3.5-flash-lite"
+MAX_OUTPUT_TOKENS = 65536
+DEFAULT_OUTPUT_TOKENS = 4096
 Level = Annotated[int, Field(ge=1, le=5, strict=True)]
 RequiredText = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=12000)
@@ -45,13 +32,13 @@ class Agent(Model):
     goal: RequiredText
     instructions: str = Field(default="", max_length=12000)
     traits: Traits = Field(default_factory=Traits)
-    max_tokens: int = Field(default=1024, ge=128, le=16384, strict=True)
+    max_tokens: int = Field(
+        default=DEFAULT_OUTPUT_TOKENS, ge=128, le=MAX_OUTPUT_TOKENS, strict=True
+    )
     reasoning: bool = False
 
 
 class DebateConfig(Model):
-    provider: Literal["groq", "gemini"] = "groq"
-    model: str = ""
     name: ShortText = "Nowa debata"
     topic: RequiredText
     question: RequiredText
@@ -62,23 +49,16 @@ class DebateConfig(Model):
     opening: RequiredText = "Przedstaw swoje stanowisko i najważniejsze argumenty na jego poparcie."
     agents: tuple[Agent, Agent]
 
-    @model_validator(mode="after")
-    def resolve_model(self):
-        expected = PROVIDERS[self.provider]["model"]
-        if self.model and self.model != expected:
-            raise ValueError("Model nie odpowiada wybranemu dostawcy.")
-        self.model = expected
-        for agent in self.agents:
-            if "max_tokens" not in agent.model_fields_set:
-                agent.max_tokens = PROVIDERS[self.provider]["default_max_tokens"]
-        return self
-
     @model_validator(mode="before")
     @classmethod
-    def discard_legacy_word_target(cls, data):
+    def discard_legacy_fields(cls, data):
         # Existing drafts and archived configurations remain reusable.
-        if isinstance(data, dict) and "target_words" in data:
-            return {key: value for key, value in data.items() if key != "target_words"}
+        if isinstance(data, dict):
+            return {
+                key: value
+                for key, value in data.items()
+                if key not in {"target_words", "provider", "model"}
+            }
         return data
 
 
